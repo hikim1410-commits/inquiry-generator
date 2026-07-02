@@ -1,5 +1,26 @@
 # 교훈 기록 (Lessons Learned)
 
+## 2026-07-02: 업데이트 적용 실패 — 동결 빌드에서 "unknown encoding: utf-8-sig" (v1.4.0)
+- **발생**: 실제 사용자 PC에서 [지금 업데이트] 클릭 → "업데이트 스크립트 작성 실패:
+  unknown encoding: utf-8-sig" 토스트. `%TEMP%\navion_update\apply_update.ps1`이
+  0바이트로 남음(파일은 열렸지만 `fp.write` 전에 예외 발생 — 트렁케이트만 되고 씀은 실패).
+- **원인(강한 정황 증거, 재현은 못함)**: `open(path, "w", encoding="utf-8-sig")`는
+  순수파이썬 `encodings.utf_8_sig` 모듈을 **첫 사용 시점에 동적 import**한다. 반면
+  `apply_update()`는 pywebview JS↔Python 브릿지 콜백(메인 스레드가 아님)에서 호출된다.
+  PyInstaller 동결 빌드 + 비-메인 스레드에서 특정 코덱을 그 프로세스 최초로 사용할 때
+  간헐적으로 `LookupError: unknown encoding: ...`가 나는 사례가 CPython/PyInstaller
+  생태계에 보고돼 있다. `utf-8`/`ascii`는 인터프리터에 내장(C)이라 이 문제가 없지만
+  `utf-8-sig`는 동적 import가 필요해 취약하다.
+- **수정**: `updater.py`의 BOM 작성을 `encoding="utf-8-sig"` 대신 바이너리 모드로
+  `b"\xef\xbb\xbf"` + `text.replace("\n","\r\n").encode("utf-8")`로 직접 구성(바이트
+  단위로 기존 결과와 동일함을 로컬 검증). `kordoc.py::_read_text_passthrough`의
+  `raw.decode("utf-8-sig")`도 같은 취약점이라 BOM 수동 스트립 + `utf-8`/`cp949`
+  디코드로 교체.
+- **방지책**: 앱 어디서든 `"utf-8-sig"`(또는 첫 사용이 드문 인코딩)를 새로 쓰지 말 것.
+  BOM이 필요하면 `b"\xef\xbb\xbf"` + 내장 `"utf-8"` 조합으로 직접 만든다.
+- **남은 위험**: 사용자 PC의 설치본이 이 실패 도중 robocopy 재시도(exit 11=부분 실패)까지
+  겹쳐 `_internal`이 신/구 파일 혼재 상태일 수 있음 — 재현 확인 시 클린 재설치 권장.
+
 ## 2026-06-17: 견적서 '읽기 전용'의 진범 — 생성 후 문서를 안 닫아 백그라운드 한글이 파일 잠금 (v1.2.7)
 - **발생**: 생성된 견적서를 열면 한글이 '읽기 전용'으로 연다. OS 읽기전용 비트 해제
   (`_clear_readonly`, chmod)를 v1.2.6에 넣었는데도 "여전히 동일".

@@ -255,9 +255,15 @@ def _clean_markdown(md: str) -> str:
 
 
 def _read_text_passthrough(path: str) -> str:
-    """txt/md는 kordoc 없이 직접 읽기 (utf-8 → cp949 폴백)."""
+    """txt/md는 kordoc 없이 직접 읽기 (utf-8 → cp949 폴백).
+
+    "utf-8-sig" 대신 BOM을 직접 벗겨 "utf-8"로 읽는다 — 동결 빌드에서 순수파이썬
+    encodings.utf_8_sig 모듈의 지연 import가 실패하는 사례가 있었다(updater.py 참고).
+    """
     raw = open(path, "rb").read()
-    for enc in ("utf-8-sig", "utf-8", "cp949"):
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    for enc in ("utf-8", "cp949"):
         try:
             return raw.decode(enc)
         except UnicodeDecodeError:

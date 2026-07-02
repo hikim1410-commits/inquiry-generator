@@ -8,7 +8,7 @@
 만든다 (예: __version__ = "1.2.1" → 태그 v1.2.1). 절차는 docs/RELEASE.md 참조.
 """
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 # 자동 업데이트가 조회할 GitHub 저장소 ("owner/repo"). 공개 저장소 전제.
 GITHUB_REPO = "bbiyakfather/inquiry-generator"

@@ -273,9 +273,15 @@ Log '정리 완료'
 """
 
     try:
-        # PowerShell 5.1은 BOM 없는 .ps1을 ANSI로 읽어 한글 경로가 깨진다 → utf-8-sig(BOM)
-        with open(ps_path, "w", encoding="utf-8-sig") as fp:
-            fp.write(ps)
+        # PowerShell 5.1은 BOM 없는 .ps1을 ANSI로 읽어 한글 경로가 깨진다 → BOM 필요.
+        # encoding="utf-8-sig"는 순수파이썬 encodings.utf_8_sig 모듈을 첫 사용 시 동적
+        # import하는데, PyInstaller 동결 빌드에서 pywebview JS브릿지 스레드(비-메인)로
+        # 이 코드가 처음 실행되면 "unknown encoding: utf-8-sig"로 실패하는 사례가
+        # 실측됨(2026-07-02). 항상 쓸 수 있는 내장 utf-8 코덱으로 BOM 바이트를 직접
+        # 붙여 동일한 바이트 결과를 우회 생성한다.
+        with open(ps_path, "wb") as fp:
+            fp.write(b"\xef\xbb\xbf")
+            fp.write(ps.replace("\n", "\r\n").encode("utf-8"))
     except Exception as e:
         return {"ok": False, "error": f"업데이트 스크립트 작성 실패: {e}"}
 
