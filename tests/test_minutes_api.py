@@ -261,7 +261,44 @@ def test_save_minutes_cellmap_api_roundtrip(workdir):
     assert fm["version"] == 2
     assert fm["cell_map"] == {"business_name": [2, 2]}
     assert fm["custom_slots"] == custom
-    assert fm["annotations"] == anns
+    assert fm["annotations"] == [{"table": 0, **anns[0]}]   # table 기본 0 부여
+
+
+def test_auto_label_minutes_form_fills_nxny(monkeypatch, workdir):
+    """auto_label_minutes_form: grid 조회 → auto_label_cells 호출 → nx,ny 채움.
+    auto_label_cells를 모킹해 첫 셀에 핀을 만들고, API가 해당 셀 중심을 채우는지 확인."""
+    import src.ai.minutes_template_mapper as mtm
+    tpl = _copy_template(workdir, "자동양식.hwpx")
+    api = _api(workdir)
+
+    def fake_auto(grid_cells, provider, api_key, model, timeout=30):
+        c = grid_cells[0]
+        return {"ok": True, "pins": [{"table": c.get("table", 0), "row": c["row"],
+                                      "col": c["col"], "label": "자동라벨"}]}
+
+    monkeypatch.setattr(mtm, "auto_label_cells", fake_auto)
+    r = api.auto_label_minutes_form(tpl)
+    assert r["ok"], r.get("error")
+    assert len(r["pins"]) == 1
+    p = r["pins"][0]
+    assert p["label"] == "자동라벨"
+    assert "nx" in p and "ny" in p
+    assert 0.0 <= p["nx"] <= 1.0 and 0.0 <= p["ny"] <= 1.0
+
+
+def test_auto_label_minutes_form_no_key(workdir):
+    """AI 키 없으면 ok:False + 빈 pins (안내)."""
+    tpl = _copy_template(workdir, "노키양식.hwpx")
+    api = _api(workdir)               # AI 키 없음
+    r = api.auto_label_minutes_form(tpl)
+    assert not r["ok"]
+    assert r.get("pins") == []
+
+
+def test_auto_label_minutes_form_missing_file(workdir):
+    api = _api(workdir)
+    r = api.auto_label_minutes_form(os.path.join(workdir, "없음.hwpx"))
+    assert not r["ok"]
 
 
 def test_scan_minutes_template_includes_grid(workdir):
@@ -364,7 +401,7 @@ def test_load_minutes_cellmap_roundtrip(workdir):
     assert r["version"] == 2
     assert r["cell_map"] == {"business_name": [2, 2]}
     assert r["custom_slots"] == custom
-    assert r["annotations"] == anns
+    assert r["annotations"] == [{"table": 0, **anns[0]}]   # table 기본 0 부여
 
 
 def test_load_minutes_cellmap_no_fieldmap(workdir):

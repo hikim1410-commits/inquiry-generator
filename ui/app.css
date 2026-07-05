@@ -335,6 +335,8 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;
 .modal label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink2)}
 .modal textarea{resize:vertical}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
+.modal-actions .mn-map-autolabel{margin-right:auto}
+.modal-actions .mn-map-autolabel:disabled{opacity:.5;cursor:not-allowed}
 
 /* AI 모달 2단계 */
 .ai-status{display:none}
@@ -447,12 +449,13 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;
 .mn-participants{display:flex;flex-direction:column;gap:6px}
 .mn-part-row{display:flex;gap:6px;align-items:center}
 .mn-part-row input{flex:1}
-.mn-sections{display:flex;flex-direction:column;gap:6px}
-.mn-sec-row{display:flex;align-items:center;gap:6px}
-.mn-sec-row select{width:88px;padding:5px 4px;border:1px solid var(--line);border-radius:6px;
-  font-size:12px;background:var(--bg);color:var(--ink);flex-shrink:0}
-.mn-sec-row input[type=text]{flex:1}
-.mn-sec-row .btn-mini{flex-shrink:0}
+/* 회의 메모(1단계)·회의 내용(2단계) — .minutes-form 은 .editor-form 폼 규칙 밖이라 직접 부여 */
+#mn-memo,.mn-content-text{width:100%;box-sizing:border-box;resize:vertical;
+  border:1px solid var(--line);border-radius:9px;padding:9px 11px;outline:none;
+  background:var(--panel);font-size:13px;line-height:1.6;font-weight:500;font-family:inherit}
+#mn-memo:focus,.mn-content-text:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+#mn-memo{min-height:120px}
+.mn-content-text{min-height:240px;line-height:1.7}
 
 /* 업데이트 배너 */
 .update-banner{display:flex;align-items:center;gap:10px;padding:9px 16px;
@@ -480,12 +483,17 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;
 .mn-preset-actions .btn-mini{flex:1;justify-content:center;min-width:64px}
 
 /* ===== 매핑 편집기 (T-F2 이미지-핀) ===== */
-.mn-map-layout{display:grid;grid-template-columns:1fr 300px;gap:18px;align-items:start}
+.mn-map-layout{display:grid;grid-template-columns:1fr 340px;gap:18px;align-items:start}
 .mn-map-gridwrap{max-height:64vh;overflow:auto;border:1px solid var(--line);border-radius:10px;
   background:var(--bg2,#F4F6FB);padding:16px;display:flex;justify-content:center}
 /* 양식 이미지 캔버스 — 실제 표 비율(폭은 JS, 높이는 비율로 산출) */
 .mn-map-canvas{position:relative;background:#fff;box-shadow:var(--shadow);flex-shrink:0;cursor:crosshair}
 #mn-map-layer{position:absolute;inset:0}
+/* 표 경계 박스 (다중 표 구분) — 클릭 통과 */
+.mn-table-box{position:absolute;box-sizing:border-box;border:2px solid var(--brand);border-radius:3px;
+  pointer-events:none;z-index:2}
+.mn-table-tag{position:absolute;top:-9px;left:4px;background:var(--brand);color:#fff;font-size:9px;
+  font-weight:800;line-height:1;padding:2px 5px;border-radius:6px}
 .mn-cell-box{position:absolute;box-sizing:border-box;border:1px solid #C4CCDA;overflow:hidden;
   padding:3px 4px;pointer-events:none;display:flex;flex-direction:column;gap:1px}
 .mn-cell-box.mapped{background:var(--brand-soft);border-color:var(--brand)}
@@ -517,6 +525,28 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;
 .mn-status-val{font-size:11.5px;font-weight:700;color:var(--ink3)}
 .mn-status-row.on .mn-status-val{color:var(--brand)}
 .mn-status-sep{font-size:11px;font-weight:800;color:var(--ink3);margin-top:6px}
+/* 상단 고정 항목 — 편집형 리스트(이름변경·순서·삭제) */
+.mn-map-side-hint{font-size:11px;color:var(--ink3);line-height:1.5;margin:-4px 0 4px}
+.mn-item-empty{font-size:12px;color:var(--ink3);line-height:1.6;padding:12px 10px;
+  border:1px dashed var(--line);border-radius:8px;text-align:center}
+.mn-item-row{display:flex;align-items:center;gap:5px;padding:4px 6px;border:1px solid var(--line);
+  border-radius:8px;background:var(--bg)}
+.mn-item-row.std{border-color:var(--brand);background:var(--brand-soft)}
+.mn-item-label{flex:1;min-width:0;border:1px solid transparent;background:transparent;border-radius:5px;
+  padding:3px 5px;font-size:12px;font-weight:700;color:var(--ink);outline:none}
+.mn-item-label:focus{border-color:var(--brand);background:#fff}
+.mn-item-tag{font-size:9px;font-weight:800;padding:1px 4px;border-radius:5px;flex-shrink:0}
+.mn-item-tag.std{background:var(--brand);color:#fff}
+.mn-item-tag.custom{background:var(--orange,#F59E0B);color:#fff}
+.mn-item-coord{font-size:10.5px;font-weight:700;color:var(--ink3);flex-shrink:0;white-space:nowrap}
+.mn-item-btn{flex-shrink:0;width:20px;height:22px;border:1px solid var(--line);border-radius:5px;
+  background:#fff;cursor:pointer;font-size:10px;color:var(--ink2);padding:0;line-height:1}
+.mn-item-btn:hover{border-color:var(--brand);color:var(--brand)}
+.mn-item-btn.del:hover{border-color:var(--danger,#EF4444);color:var(--danger,#EF4444)}
+/* 회의 내용 — 고정(편집 불가) 행 */
+.mn-item-row.fixed{background:var(--bg2,#F4F6FB);border-style:dashed}
+.mn-item-fixedlabel{flex:1;min-width:0;padding:3px 5px;font-size:12px;font-weight:800;color:var(--ink2)}
+.mn-item-coord.off{color:var(--orange,#F59E0B)}
 
 /* 스크롤바 */
 ::-webkit-scrollbar{width:10px;height:10px}

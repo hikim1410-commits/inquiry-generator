@@ -9,8 +9,55 @@ import pytest
 
 from src.ai.minutes_template_mapper import (
     save_minutes_cellmap, save_minutes_fieldmap, load_minutes_fieldmap,
+    auto_label_cells,
 )
+import src.ai.minutes_template_mapper as mtm
 from src.minutes.hwpx_minutes import DEFAULT_CELLS
+
+
+# ── auto_label_cells: AI 모킹(llm.complete_json) ──────────────────────────────
+
+_AUTO_GRID = [
+    {"table": 0, "row": 0, "col": 0, "text": "회사명"},
+    {"table": 0, "row": 0, "col": 1, "text": ""},
+    {"table": 0, "row": 1, "col": 0, "text": "제품명"},
+    {"table": 0, "row": 1, "col": 1, "text": ""},
+]
+
+
+def _mock_llm(monkeypatch, pins):
+    monkeypatch.setattr(mtm.llm, "complete_json",
+                        lambda *a, **k: {"ok": True, "data": {"pins": pins}})
+
+
+def test_auto_label_drops_nonexistent_and_dupes(monkeypatch):
+    _mock_llm(monkeypatch, [
+        {"table": 0, "row": 0, "col": 1, "label": "회사명"},
+        {"table": 0, "row": 1, "col": 1, "label": "제품명"},
+        {"table": 0, "row": 9, "col": 9, "label": "없는칸"},     # (a) 존재X
+        {"table": 0, "row": 0, "col": 1, "label": "중복좌표"},   # (b) 중복
+        {"table": 0, "row": 1, "col": 1, "label": "  "},          # 빈 라벨
+    ])
+    r = auto_label_cells(_AUTO_GRID, "gemini", "fakekey", "m")
+    assert r["ok"]
+    coords = [(p["table"], p["row"], p["col"]) for p in r["pins"]]
+    assert coords == [(0, 0, 1), (0, 1, 1)]      # 존재·고유·라벨 있는 핀만
+    assert r["pins"][0]["label"] == "회사명"      # 첫 중복(둘째 '중복좌표' 거부)
+
+
+def test_auto_label_no_key():
+    r = auto_label_cells(_AUTO_GRID, "gemini", "", "m")   # (c) 키 없음
+    assert r["ok"] is False
+    assert r["pins"] == []
+    assert r.get("error")
+
+
+def test_auto_label_ai_failure(monkeypatch):
+    monkeypatch.setattr(mtm.llm, "complete_json",
+                        lambda *a, **k: {"ok": False, "error": "boom"})
+    r = auto_label_cells(_AUTO_GRID, "gemini", "fakekey", "m")
+    assert r["ok"] is False
+    assert r["pins"] == []
 
 
 @pytest.fixture()
@@ -31,7 +78,8 @@ def test_save_cellmap_roundtrip(tpl):
     assert fm["version"] == 2
     assert fm["cell_map"] == {"business_name": [2, 2], "meeting_topic": [3, 1]}
     assert fm["custom_slots"] == custom
-    assert fm["annotations"] == anns
+    # table 기본 0 부여(다중 표 후방호환) — 입력에 table 없어도 정규화본엔 포함
+    assert fm["annotations"] == [{"table": 0, **anns[0]}]
 
 
 def test_save_cellmap_is_standard_recalc(tpl):

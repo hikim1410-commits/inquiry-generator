@@ -1244,6 +1244,41 @@ class Api:
         except Exception as e:
             return _err(e, traceback=traceback.format_exc())
 
+    def auto_label_minutes_form(self, template_path: str) -> dict:
+        """양식의 라벨 칸을 AI로 식별 → 입력 칸에 항목명 핀 자동 생성.
+
+        scan_hwpx_grid로 grid를 얻어 auto_label_cells(현재 provider/key/model) 호출,
+        각 pin에 해당 셀 중심 nx,ny를 채워 프론트가 바로 핀 배치 가능하게 한다.
+        반환: {ok, pins:[{table,row,col,label,nx,ny}], error?}. 키 없으면 ok:False+안내.
+        """
+        try:
+            from src.scan.hwpx_scan import scan_hwpx_grid
+            from src.ai.minutes_template_mapper import auto_label_cells
+            if not os.path.isfile(template_path):
+                return _err(f"파일을 찾을 수 없습니다: {template_path}")
+            grid = scan_hwpx_grid(template_path)
+            if not grid.get("ok"):
+                return grid
+            provider = cs.get_provider(self.cfg)
+            api_key = cs.get_ai_key(self.cfg, provider)
+            res = auto_label_cells(grid["cells"], provider, api_key,
+                                   cs.get_ai_model(self.cfg, provider))
+            if not res.get("ok"):
+                return _err(res.get("error", "자동 인식 실패"), pins=[])
+            by_cell = {(c.get("table", 0), c["row"], c["col"]): c
+                       for c in grid["cells"]}
+            pins = []
+            for p in res["pins"]:
+                c = by_cell.get((p["table"], p["row"], p["col"]))
+                pin = dict(p)
+                if c:                     # 셀 중심 — 프론트 핀 배치용
+                    pin["nx"] = c["nx"] + c["nw"] / 2
+                    pin["ny"] = c["ny"] + c["nh"] / 2
+                pins.append(pin)
+            return {"ok": True, "pins": pins}
+        except Exception as e:
+            return _err(e, traceback=traceback.format_exc())
+
     def save_minutes_cellmap(self, template_path: str, cell_map: dict = None,
                              custom_slots=None, annotations=None) -> dict:
         """사용자 편집본(cell_map + custom_slots + annotations)을 fieldmap v2로 저장.

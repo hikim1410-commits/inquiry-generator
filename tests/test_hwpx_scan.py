@@ -216,21 +216,76 @@ def test_geometry_normalized_consistent():
 
 
 def test_hit_test_pin_to_cell():
-    """핀→셀 역추적: (0.48,0.18)→(5,1), (0.91,0.18)→(5,2),
-       (0.56,0.61)→(6,1), (0.5,0.05)→(1,1)."""
+    """핀→셀 역추적(단일 표=table 0): (0.48,0.18)→(0,5,1), (0.91,0.18)→(0,5,2),
+       (0.56,0.61)→(0,6,1), (0.5,0.05)→(0,1,1)."""
     cells = hx.scan_hwpx_grid(TEMPLATE_MINUTES)["cells"]
-    assert hx.hit_test_cell(cells, 0.48, 0.18) == (5, 1)
-    assert hx.hit_test_cell(cells, 0.91, 0.18) == (5, 2)
-    assert hx.hit_test_cell(cells, 0.56, 0.61) == (6, 1)
-    assert hx.hit_test_cell(cells, 0.5, 0.05) == (1, 1)
+    assert hx.hit_test_cell(cells, 0.48, 0.18) == (0, 5, 1)
+    assert hx.hit_test_cell(cells, 0.91, 0.18) == (0, 5, 2)
+    assert hx.hit_test_cell(cells, 0.56, 0.61) == (0, 6, 1)
+    assert hx.hit_test_cell(cells, 0.5, 0.05) == (0, 1, 1)
 
 
 def test_hit_test_edges_and_outside():
     """엣지(우/하단)·코너는 마지막 포함셀로 귀속, 음수는 None."""
     cells = hx.scan_hwpx_grid(TEMPLATE_MINUTES)["cells"]
-    assert hx.hit_test_cell(cells, 1.0, 1.0) == (6, 1)   # 우하단 코너
-    assert hx.hit_test_cell(cells, 0.0, 0.0) == (0, 0)   # 좌상단
+    assert hx.hit_test_cell(cells, 1.0, 1.0) == (0, 6, 1)   # 우하단 코너
+    assert hx.hit_test_cell(cells, 0.0, 0.0) == (0, 0, 0)   # 좌상단
     assert hx.hit_test_cell(cells, -0.1, 0.5) is None
+
+
+# ── 다중 표 발주처 양식 실측 (경로 존재 시에만) ──────────────────────────────
+
+_MULTI = r"C:\Users\eicic.AIDEN-DESKTOP\Downloads\인터비즈 바이오 상담일지_그래핀스퀘어케미칼.hwpx"
+
+
+@pytest.mark.skipif(not os.path.isfile(_MULTI), reason="다중 표 실측 파일 없음")
+def test_multi_table_scan_all_tables():
+    """발주처 양식: 최상위 표 10개(중첩 5 제외)·전부 수집(첫 표만 아님)."""
+    g = hx.scan_hwpx_grid(_MULTI)
+    assert g["ok"], g.get("error")
+    # 문서 흐름의 최상위 표만(중첩 사진표는 부모 셀로 흡수) → 10개
+    assert len(g["tables"]) == 10, f"표 {len(g['tables'])}개 (기대 10 최상위)"
+    # 첫 표 1개만 잡히던 버그 회귀 방지: 셀이 표 1개분(<=2)보다 훨씬 많아야 함
+    assert len(g["cells"]) > 50
+    # 표 인덱스 0..9 연속 부여
+    assert sorted({c["table"] for c in g["cells"]}) == list(range(10))
+    # 본문 표(14셀)와 헤더 표(2셀)가 번갈아 — 다양한 표 크기 수집 확인
+    sizes = [t["row_cnt"] for t in g["tables"]]
+    assert max(sizes) >= 5 and min(sizes) >= 1
+
+
+@pytest.mark.skipif(not os.path.isfile(_MULTI), reason="다중 표 실측 파일 없음")
+def test_multi_table_cells_distinct_by_table():
+    """서로 다른 표의 셀이 (table,row,col)로 구분된다 (동일 row,col이 표마다 존재)."""
+    g = hx.scan_hwpx_grid(_MULTI)
+    # 같은 (row,col)이 둘 이상의 표에 등장 — table 없이는 충돌
+    from collections import Counter
+    rc = Counter((c["row"], c["col"]) for c in g["cells"])
+    assert any(v >= 2 for v in rc.values()), "표 간 (row,col) 중복이 없음 — 다중 표 아님?"
+    # (table,row,col) 풀키는 유일
+    keys = [(c["table"], c["row"], c["col"]) for c in g["cells"]]
+    assert len(keys) == len(set(keys)), "(table,row,col) 중복 — 셀 구분 실패"
+
+
+@pytest.mark.skipif(not os.path.isfile(_MULTI), reason="다중 표 실측 파일 없음")
+def test_multi_table_hit_test_lower_table():
+    """전체 캔버스 정규화 좌표 → hit_test가 '아래쪽' 표의 셀을 올바른 table로 반환.
+
+    캔버스는 세로 스택이라 ny가 클수록 뒤쪽(아래) 표. 마지막 표 한 셀의 중심을
+    찍으면 그 table 인덱스로 역추적돼야 한다(0번 표가 아님).
+    """
+    g = hx.scan_hwpx_grid(_MULTI)
+    last = g["tables"][-1]["table"]
+    # 마지막 표의 임의 셀 중심
+    cell = next(c for c in g["cells"] if c["table"] == last)
+    cx = cell["nx"] + cell["nw"] / 2
+    cy = cell["ny"] + cell["nh"] / 2
+    hit = hx.hit_test_cell(g["cells"], cx, cy)
+    assert hit is not None
+    assert hit == (last, cell["row"], cell["col"]), \
+        f"하단 표 핀 역추적 실패: {hit} (기대 {(last, cell['row'], cell['col'])})"
+    # 캔버스가 세로로 길다(다중 표 스택) — ratio>1
+    assert g["canvas"]["ratio"] > 1
 
 
 def test_geometry_cellsz_fallback():

@@ -226,45 +226,50 @@ def compute_table_geometry(cells: list) -> dict:
 
 
 def hit_test_cell(cells: list, nx: float, ny: float):
-    """정규화 좌표 (nx,ny)∈[0,1]를 포함하는 셀의 (row,col) 반환 — 핀→셀 역추적.
+    """정규화 좌표 (nx,ny)∈[0,1]를 포함하는 셀의 (table,row,col) 반환 — 핀→셀 역추적.
 
-    cells는 compute_table_geometry로 nx,ny,nw,nh가 주입돼 있어야 한다.
+    cells는 compute_table_geometry/scan_hwpx_grid로 nx,ny,nw,nh가 (전체 캔버스 기준)
+    주입돼 있어야 한다. 다중 표에서는 같은 (row,col)이 여러 표에 있으므로 table로 구분.
     반열림 [x,x+w) 우선, 우/하단 엣지(nx==1,ny==1)는 닫힘 폴백으로 마지막 셀에 귀속.
-    포함 셀이 없으면 None.
+    포함 셀이 없으면 None. (table 키 없는 단일 표 셀은 table=0)
     """
     for c in cells:
         if c["nx"] <= nx < c["nx"] + c["nw"] and c["ny"] <= ny < c["ny"] + c["nh"]:
-            return (c["row"], c["col"])
+            return (c.get("table", 0), c["row"], c["col"])
     for c in cells:  # 엣지 폴백 (닫힘 구간)
         if c["nx"] <= nx <= c["nx"] + c["nw"] and c["ny"] <= ny <= c["ny"] + c["nh"]:
-            return (c["row"], c["col"])
+            return (c.get("table", 0), c["row"], c["col"])
     return None
 
 
-def scan_hwpx_grid(path: str) -> dict:
-    """회의록 HWPX 템플릿의 첫 번째 표 전체 셀을 기하 정밀 그리드로 추출.
+def _iter_top_tables(root) -> list:
+    """문서 흐름의 최상위 표만 반환 (다른 tc 내부의 중첩표는 제외).
 
-    반환: {ok, row_cnt, col_cnt, table_w, table_h, col_w, row_h,
-           cells: [{row, col, text, colspan, rowspan, x, y, w, h, nx, ny, nw, nh}], error?}
-    각 cell.text 는 라벨("사업명" 등) 또는 기존 샘플값. x,y,w,h는 HWPUNIT 절대좌표,
-    nx,ny,nw,nh는 0..1 정규화 — 프론트가 실제 비율로 양식을 렌더하고 핀을 역추적한다.
-    기존 키(row,col,text,colspan,rowspan)는 그대로 유지(후방호환).
-    colspan/rowspan(cellSpan)은 병합셀 반영. cellSz 누락 시 compute_table_geometry 폴백.
-    외부 표 직계 tr/tc만 순회하므로 중첩표(사진표) 셀은 그리드에 포함되지 않는다.
+    ElementTree는 부모 포인터가 없어 부모맵을 1회 구성해 tbl 조상 유무로 판정.
+    표가 1개 이하면 맵 구성 없이 즉시 반환(내장 단일 표 양식 경로).
     """
-    try:
-        with zipfile.ZipFile(path) as zf:
-            with zf.open("Contents/section0.xml") as fp:
-                root = ET.parse(fp).getroot()
-    except (zipfile.BadZipFile, OSError, KeyError, ET.ParseError) as e:
-        return {"ok": False, "error": f"HWPX 파싱 실패: {e}"}
+    all_tbl = root.findall(f".//{_HP}tbl")
+    if len(all_tbl) <= 1:
+        return all_tbl
+    parent = {ch: pa for pa in root.iter() for ch in pa}
 
-    tbl = root.find(f".//{_HP}tbl")
-    if tbl is None:
-        return {"ok": False, "error": "양식에서 표를 찾을 수 없습니다."}
+    def is_nested(t):
+        cur = parent.get(t)
+        while cur is not None:
+            if cur.tag == f"{_HP}tbl":
+                return True
+            cur = parent.get(cur)
+        return False
 
+    return [t for t in all_tbl if not is_nested(t)]
+
+
+def _extract_table_cells(tbl) -> list:
+    """한 표의 직계 tr/tc만 순회해 셀 메타 추출 (중첩표 셀은 제외).
+
+    반환 각 항목: {row, col, text, colspan, rowspan, width, height}.
+    """
     cells = []
-    max_r = max_c = 0
     for tr in tbl.findall(f"{_HP}tr"):
         for tc in tr.findall(f"{_HP}tc"):
             addr = tc.find(f"{_HP}cellAddr")
@@ -275,7 +280,6 @@ def scan_hwpx_grid(path: str) -> dict:
                 c = int(addr.attrib.get("colAddr", "0"))
             except ValueError:
                 continue
-            max_r, max_c = max(max_r, r), max(max_c, c)
             span = tc.find(f"{_HP}cellSpan")
             try:
                 colspan = int(span.attrib.get("colSpan", "1")) if span is not None else 1
@@ -302,11 +306,86 @@ def scan_hwpx_grid(path: str) -> dict:
             cells.append({"row": r, "col": c, "text": txt[:120],
                           "colspan": colspan, "rowspan": rowspan,
                           "width": width, "height": height})
+    return cells
 
-    geo = compute_table_geometry(cells)
-    return {"ok": True, "row_cnt": max_r + 1, "col_cnt": max_c + 1,
+
+def scan_hwpx_grid(path: str) -> dict:
+    """회의록 HWPX 양식의 모든(최상위) 표를 기하 정밀 그리드로 추출.
+
+    발주처 양식은 표가 여러 개라, 모든 최상위 표를 문서 순서대로 세로로 쌓아
+    하나의 가상 캔버스로 만든다. 각 셀의 nx,ny,nw,nh는 '전체 캔버스' 기준이라
+    프론트가 그대로 % 절대배치하면 폼 전체가 보인다.
+
+    레이아웃:
+      - 각 표는 compute_table_geometry로 자체 col_w/row_h/table_w/table_h·셀 bbox 산출.
+      - 캔버스 기준폭 = 표들 중 최대 table_w (좁은 표는 좁게, 전폭 표는 넓게).
+        (pagePr 폭 대신 최대표폭 — 단일 표일 때 캔버스폭=table_w라 기존 정규화와 동일,
+         후방호환을 무료로 얻는다.)
+      - 표는 좌측정렬(x_off=0)로 문서 순서대로 세로 스택, 표 사이 작은 간격(gap).
+
+    반환: {ok,
+      cells: [{table, row, col, text, colspan, rowspan, x, y, w, h, nx, ny, nw, nh}],
+      tables: [{table, row_cnt, col_cnt, table_w, table_h, nx, ny, nw, nh}],
+      canvas: {w, h, ratio},
+      # 후방호환(단일 표 소비자) — 첫 표 기준
+      row_cnt, col_cnt, table_w, table_h, col_w, row_h, error?}
+    x,y,w,h는 표 내부 HWPUNIT 절대좌표, nx,ny,nw,nh는 전체 캔버스 0..1 정규화.
+    중첩표(사진표) 셀은 부모 셀로 취급되어 별도 표로 수집되지 않는다.
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            with zf.open("Contents/section0.xml") as fp:
+                root = ET.parse(fp).getroot()
+    except (zipfile.BadZipFile, OSError, KeyError, ET.ParseError) as e:
+        return {"ok": False, "error": f"HWPX 파싱 실패: {e}"}
+
+    tbls = _iter_top_tables(root)
+    if not tbls:
+        return {"ok": False, "error": "양식에서 표를 찾을 수 없습니다."}
+
+    # 1) 표별 셀·기하
+    per_table = []  # [(cells, geo)]
+    for ti, tbl in enumerate(tbls):
+        cells = _extract_table_cells(tbl)
+        geo = compute_table_geometry(cells)  # 셀에 x,y,w,h,nx,ny,nw,nh(표기준) 주입
+        for c in cells:
+            c["table"] = ti
+        per_table.append((cells, geo))
+
+    # 2) 캔버스 종합 — 최대 표폭 기준, 세로 스택
+    canvas_w = max((geo["table_w"] for _, geo in per_table), default=0) or 1
+    gap = round(canvas_w * 0.02)  # 표 사이 작은 간격
+    total_h = sum(geo["table_h"] for _, geo in per_table)
+    canvas_h = (total_h + gap * (len(per_table) - 1)) or 1
+
+    all_cells, tables_meta = [], []
+    y_off = 0
+    for ti, (cells, geo) in enumerate(per_table):
+        for c in cells:  # 표기준 bbox → 전체 캔버스 정규화 (좌측정렬: x_off=0)
+            c["nx"] = c["x"] / canvas_w
+            c["ny"] = (y_off + c["y"]) / canvas_h
+            c["nw"] = c["w"] / canvas_w
+            c["nh"] = c["h"] / canvas_h
+        tables_meta.append({
+            "table": ti,
+            "row_cnt": max((c["row"] + c["rowspan"] for c in cells), default=0),
+            "col_cnt": max((c["col"] + c["colspan"] for c in cells), default=0),
             "table_w": geo["table_w"], "table_h": geo["table_h"],
-            "col_w": geo["col_w"], "row_h": geo["row_h"], "cells": cells}
+            "nx": 0.0, "ny": y_off / canvas_h,
+            "nw": geo["table_w"] / canvas_w, "nh": geo["table_h"] / canvas_h,
+        })
+        all_cells.extend(cells)
+        y_off += geo["table_h"] + gap
+
+    g0 = per_table[0][1]
+    t0 = tables_meta[0]
+    return {"ok": True,
+            "cells": all_cells, "tables": tables_meta,
+            "canvas": {"w": canvas_w, "h": canvas_h, "ratio": canvas_h / canvas_w},
+            # 후방호환 — 첫 표 기준 단일 표 키
+            "row_cnt": t0["row_cnt"], "col_cnt": t0["col_cnt"],
+            "table_w": g0["table_w"], "table_h": g0["table_h"],
+            "col_w": g0["col_w"], "row_h": g0["row_h"]}
 
 
 def scan_folder(folder: str) -> list:

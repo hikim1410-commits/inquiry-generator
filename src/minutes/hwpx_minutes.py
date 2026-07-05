@@ -195,6 +195,57 @@ def _make_para(ptype, text, vertpos):
     return None, vertpos
 
 
+def _capture_content_styles(old_paras):
+    """기존 회의내용 셀 문단에서 header/bullet/sub/empty 스타일 원본(deepcopy)을 추출.
+
+    양식마다 문단 스타일 ID(paraPrIDRef)의 정렬·들여쓰기가 다르다(표준=JUSTIFY,
+    어떤 커스텀 양식은 동일 ID가 CENTER). 하드코딩 ID 대신 **그 양식의 본문 문단
+    스타일을 그대로 물려받아** 텍스트만 갈아끼우면 어떤 양식이든 정렬이 맞는다.
+    못 찾은 레벨은 None → 호출부가 _make_para 로 폴백.
+    """
+    header = bullet = sub = empty = None
+    for pp in old_paras:
+        if pp.find(f'.//{_HP}tbl') is not None:
+            continue  # 사진표 문단 제외
+        ppr = pp.attrib.get('paraPrIDRef')
+        txt = ''.join((t.text or '') for t in pp.findall(f'.//{_HP}t')).strip()
+        if not txt:
+            if empty is None:
+                empty = copy.deepcopy(pp)
+        elif txt.startswith('■'):
+            if header is None:
+                header = copy.deepcopy(pp)
+        elif bullet is None:
+            bullet = copy.deepcopy(pp)
+        elif sub is None and ppr != bullet.attrib.get('paraPrIDRef'):
+            sub = copy.deepcopy(pp)   # bullet 보다 깊은(다른) 들여쓰기 문단
+    return {"header": header, "bullet": bullet, "sub": sub, "empty": empty}
+
+
+def _fill_para_clone(tmpl, text, vertpos):
+    """원본 문단(tmpl)을 deepcopy 해 첫 <t>에 text 를 채우고 vertpos 갱신.
+
+    paraPrIDRef·charPrIDRef·linesegarray(정렬·들여쓰기·글꼴) 전부 보존된다.
+    """
+    p = copy.deepcopy(tmpl)
+    ts = p.findall(f'.//{_HP}t')
+    if ts:
+        ts[0].text = text
+        for t in ts[1:]:
+            t.text = ''
+    else:
+        run = p.find(f'{_HP}run')
+        if run is None:
+            run = ET.SubElement(p, f'{_HP}run', {'charPrIDRef': '0'})
+        ET.SubElement(run, f'{_HP}t').text = text
+    lsa = p.find(f'{_HP}linesegarray')
+    if lsa is not None:
+        ls = lsa.find(f'{_HP}lineseg')
+        if ls is not None:
+            ls.attrib['vertpos'] = str(vertpos)
+    return p, vertpos + 1760
+
+
 # ── 공개 API ─────────────────────────────────────────────────────────────────
 
 def _norm_cells(cell_map):
@@ -318,12 +369,16 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
             sl6 = tc6_1.find(f'{_HP}subList')
             old_paras = sl6.findall(f'{_HP}p')
 
+            # 사진표 = 내부에 실제 표(tbl)를 가진 문단만. (paraPrIDRef=='28'은 표준 전용
+            # 휴리스틱이라 커스텀 양식의 일반 본문 문단을 오인해 끝에 끼워넣는 버그가 있었음.)
             photo_para = None
             for pp in old_paras:
-                if (pp.attrib.get('paraPrIDRef') == '28'
-                        or pp.find(f'.//{_HP}tbl') is not None):
+                if pp.find(f'.//{_HP}tbl') is not None:
                     photo_para = copy.deepcopy(pp)
                     break
+
+            # 양식 고유 본문 문단 스타일(정렬·들여쓰기) 캡처 — 비우기 전에.
+            content_styles = _capture_content_styles(old_paras)
 
             # A-6-2: 표준 양식의 content 셀(6,1)은 사진표를 가지므로 photo_para!=None →
             # 경고 없음(동작 불변). content를 사진표 없는 셀로 재매핑하면 photo_para가
@@ -342,7 +397,16 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
             for sec in sections:
                 ptype = sec.get("type", "empty")
                 text = sec.get("text", "")
-                para, vpos = _make_para(ptype, text, vpos)
+                # 양식의 본문 스타일을 물려받아 씀(정렬 일치). 없으면 _make_para 폴백.
+                tmpl = content_styles.get(ptype)
+                if ptype == "sub" and tmpl is None:
+                    tmpl = content_styles.get("bullet")   # sub 원본 없으면 bullet+들여쓰기
+                    if tmpl is not None and text:
+                        text = "  " + text
+                if tmpl is not None:
+                    para, vpos = _fill_para_clone(tmpl, text, vpos)
+                else:
+                    para, vpos = _make_para(ptype, text, vpos)
                 if para is not None:
                     sl6.append(para)
 

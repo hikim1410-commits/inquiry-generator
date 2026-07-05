@@ -1794,10 +1794,8 @@ function renderMinutesReview(draft) {
   const parts = (draft.participants || []).length ? draft.participants : [''];
   parts.forEach(line => addParticipantRow(line));
 
-  // 섹션
-  const sWrap = $('#mn-r-sections');
-  sWrap.innerHTML = '';
-  (draft.sections || []).forEach(s => addSectionRow(s.type, s.text));
+  // 회의 내용 — 마크업 텍스트로 채움(# 제목 / - 항목 / 들여쓰기 하위 / 빈 줄)
+  $('#mn-r-content-text').value = sectionsToText(draft.sections || []);
 
   const rStatus = $('#mn-r-status');
   if (rStatus) { rStatus.textContent = ''; rStatus.className = 'ai-status'; }
@@ -1814,33 +1812,31 @@ function addParticipantRow(value) {
   $('#mn-r-participants').appendChild(row);
 }
 
-const SECTION_TYPE_LABELS = { header: '■ 제목', bullet: '• 항목', sub: '  └ 하위', empty: '빈 줄' };
-function addSectionRow(type, text) {
-  const row = el('div', 'mn-sec-row');
-  const sel = el('select');
-  ['header','bullet','sub','empty'].forEach(t => {
-    const opt = document.createElement('option');
-    opt.value = t; opt.textContent = SECTION_TYPE_LABELS[t] || t;
-    if (t === (type || 'bullet')) opt.selected = true;
-    sel.appendChild(opt);
+/* 회의 내용 텍스트 ↔ 섹션 변환 (블록 에디터 대체). 4서식 1:1, 왕복(round-trip) 안정.
+   parseSectionsText(sectionsToText(x)) 는 의미적으로 x 와 동일. */
+function parseSectionsText(text) {
+  return (text || '').split('\n').map(raw => {
+    if (!raw.trim()) return { type: 'empty', text: '' };
+    const m = raw.match(/^(\s*)(#\s+|-\s+)?(.*)$/);
+    const indent = m[1].replace(/\t/g, '  ').length, marker = m[2] || '', body = m[3].trim();
+    if (marker.charAt(0) === '#') return { type: 'header', text: body };
+    if (indent >= 2)              return { type: 'sub',    text: body };
+    return { type: 'bullet', text: body };   // '-' 또는 마커 없는 줄 → 항목
   });
-  const inp = el('input');
-  inp.type = 'text'; inp.value = text || ''; inp.placeholder = '내용 입력';
-  const rm = el('button', 'btn btn-mini');
-  rm.type = 'button'; rm.textContent = '삭제';
-  rm.addEventListener('click', () => row.remove());
-  row.appendChild(sel); row.appendChild(inp); row.appendChild(rm);
-  $('#mn-r-sections').appendChild(row);
+}
+function sectionsToText(sections) {
+  return (sections || []).map(s => {
+    if (s.type === 'empty')  return '';
+    if (s.type === 'header') return '# '   + (s.text || '');
+    if (s.type === 'sub')    return '  - ' + (s.text || '');
+    return '- ' + (s.text || '');           // bullet
+  }).join('\n');
 }
 
 function collectMinutesPayload() {
   const participants = Array.from($('#mn-r-participants').querySelectorAll('.mn-part-row input'))
     .map(i => i.value.trim()).filter(Boolean);
-  const sections = Array.from($('#mn-r-sections').querySelectorAll('.mn-sec-row'))
-    .map(row => ({
-      type: row.querySelector('select').value,
-      text: row.querySelector('input[type=text]').value.trim(),
-    }));
+  const sections = parseSectionsText($('#mn-r-content-text').value);
   return {
     business_name: $('#mn-r-business').value.trim(),
     meeting_date:  $('#mn-r-date').value.trim(),
@@ -2068,24 +2064,33 @@ async function confirmPresetDelete() {
    양식을 실제 비율 이미지로 렌더 → 아무 위치나 클릭해 핀 → 핀 위치를 포함하는
    HWPX 셀(row,col)을 JS point-in-rect로 역추적(기하는 Python 산출) → 슬롯/커스텀 지정.
    annotations[{row,col,label,comment,slot,nx,ny}] 단일 모델, 1셀=1핀. */
-const MN_CANVAS_W = 470;                  // 양식 이미지 폭(px) — 높이는 표 비율로 산출
-const mnEditor = { templatePath: '', name: '', grid: [], tableW: 0, tableH: 0,
+const MN_CANVAS_W = 470;                  // 양식 이미지 폭(px) — 높이는 캔버스 비율로 산출
+const mnEditor = { templatePath: '', name: '', grid: [], tables: [],
+                   canvasW: 0, canvasH: 0,
                    annotations: [], activePin: null, cache: {} };
 
-function mnFindAnn(r, c) {
-  return mnEditor.annotations.find(a => a.row === r && a.col === c);
+const mnT = a => (a.table || 0);          // 구버전 핀(table 없음) → table 0
+function mnFindAnn(t, r, c) {
+  return mnEditor.annotations.find(a => mnT(a) === t && a.row === r && a.col === c);
 }
 function mnPinPos(a) {   // 핀 정규화 위치 — 없으면 셀 중심으로 폴백(구버전/AI 핀)
   if (typeof a.nx === 'number' && typeof a.ny === 'number') return [a.nx, a.ny];
-  const c = mnEditor.grid.find(g => g.row === a.row && g.col === a.col);
+  const c = mnEditor.grid.find(g => g.table === mnT(a) && g.row === a.row && g.col === a.col);
   return c ? [c.nx + c.nw / 2, c.ny + c.nh / 2] : [0, 0];
 }
-function mnDeriveCellMap() {   // 표준 슬롯이 지정된 핀 → cell_map (생성 엔진 입력)
-  const m = {};
+function mnDeriveCellMap() {   // 표준 슬롯이 지정된 핀(표 0만) → cell_map (생성 엔진 입력)
+  const m = {};                // 다중 표는 annotations 중심 — cell_map은 단일 표(table 0)만
   mnEditor.annotations.forEach(a => {
-    if (a.slot && MN_SLOT_LABELS[a.slot]) m[a.slot] = [a.row, a.col];
+    if (mnT(a) === 0 && a.slot && MN_SLOT_LABELS[a.slot]) m[a.slot] = [a.row, a.col];
   });
   return m;
+}
+/* ponytail: build_minutes의 cell_map은 첫 표(표 0)만 지원 — 표>0 표준 핀은 생성물에 미반영.
+   엔진이 [table,row,col] 좌표를 받게 되면 이 경고와 위 표 0 필터를 함께 제거. */
+function mnStdSlotsOffTable0() {
+  return mnEditor.annotations
+    .filter(a => a.slot && MN_SLOT_LABELS[a.slot] && mnT(a) !== 0)
+    .map(a => MN_SLOT_LABELS[a.slot]);
 }
 
 async function openMinutesMapEditor(templatePath, name) {
@@ -2122,17 +2127,20 @@ async function openMinutesMapEditor(templatePath, name) {
 
   mnEditor.templatePath = templatePath;
   mnEditor.name = name || '';
-  mnEditor.tableW = gridResult.table_w || 0;
-  mnEditor.tableH = gridResult.table_h || 0;
+  // 캔버스 종횡비 — 다중 표 스택이면 canvas, 단일 표면 table_w/h (후방호환)
+  const cv = gridResult.canvas || {};
+  mnEditor.canvasW = cv.w || gridResult.table_w || 0;
+  mnEditor.canvasH = cv.h || gridResult.table_h || 0;
+  mnEditor.tables = gridResult.tables || [];
   mnEditor.grid = (gridResult.cells || []).map(c => ({
-    row: c.row, col: c.col, text: c.text || '',
+    table: c.table || 0, row: c.row, col: c.col, text: c.text || '',
     colspan: c.colspan || 1, rowspan: c.rowspan || 1,
     nx: c.nx || 0, ny: c.ny || 0, nw: c.nw || 0, nh: c.nh || 0,
   }));
-  // 핀 정규화 위치 보장(저장 시 nx,ny 유지되도록 미리 채움)
+  // 핀 table 기본 0(구버전) + 정규화 위치 보장(저장 시 nx,ny 유지되도록 미리 채움)
   mnEditor.annotations = (annotations || []).map(a => {
     const [nx, ny] = mnPinPos(a);
-    return { ...a, nx, ny };
+    return { ...a, table: mnT(a), nx, ny };
   });
   mnEditor.activePin = null;
 
@@ -2140,36 +2148,51 @@ async function openMinutesMapEditor(templatePath, name) {
   $('#mn-pin-pop').classList.add('hidden');
   const warn = $('#mn-map-warn'); warn.className = 'ai-status'; warn.textContent = '';
   mnBuildSlotOptions();
+  // 항목 자동 인식 버튼 — AI 키 없으면 비활성+안내
+  const auto = $('#mn-map-autolabel');
+  const hasKey = aiKeySet();
+  auto.disabled = !hasKey;
+  auto.title = hasKey
+    ? '이미 추출된 셀 라벨을 AI가 분석해 입력 칸에 항목 핀을 자동 생성합니다'
+    : 'AI 키가 없습니다 — 설정에서 키를 입력하면 자동 인식을 쓸 수 있습니다';
   renderMapCanvas(); renderSlotStatus();
   $('#mn-map-modal').classList.remove('hidden');
 }
 
-/* cell_map(slot→[r,c]) → 핀 배열(셀 중심에 표준 슬롯 핀) */
+/* cell_map(slot→[r,c]) → 핀 배열(셀 중심에 표준 슬롯 핀) — AI/표준은 항상 표 0 */
 function mnCellMapToAnns(cellMap) {
   const out = [];
   Object.entries(cellMap || {}).forEach(([slot, rc]) => {
     if (!MN_SLOT_LABELS[slot]) return;
-    out.push({ row: rc[0], col: rc[1], slot, label: MN_SLOT_LABELS[slot], comment: '' });
+    out.push({ table: 0, row: rc[0], col: rc[1], slot, label: MN_SLOT_LABELS[slot], comment: '' });
   });
   return out;
 }
 
-/* 양식을 실제 비율 이미지로 렌더 — 셀 박스 절대배치(%) + 핀 마커 */
+/* 양식의 모든 표를 실제 비율 이미지로 렌더 — 셀 박스 절대배치(%) + 표 경계 + 핀 마커.
+   nx,ny,nw,nh는 전체 캔버스(모든 표 세로 스택) 기준이라 % 절대배치하면 폼 전체가 보인다. */
 function renderMapCanvas() {
   const canvas = $('#mn-map-canvas');
-  const ratio = mnEditor.tableW ? mnEditor.tableH / mnEditor.tableW : 1;
+  const ratio = mnEditor.canvasW ? mnEditor.canvasH / mnEditor.canvasW : 1;
   canvas.style.width = MN_CANVAS_W + 'px';
   canvas.style.height = Math.round(MN_CANVAS_W * ratio) + 'px';
 
-  const mapped = {};   // "r,c" → 표시 라벨 (지정된 핀)
+  const mapped = {};   // "t,r,c" → 표시 라벨 (지정된 핀)
   mnEditor.annotations.forEach(a => {
-    const lbl = a.slot ? MN_SLOT_LABELS[a.slot] : (a.label || '');
-    if (lbl) mapped[a.row + ',' + a.col] = lbl;
+    const lbl = mnItemLabel(a);
+    if (lbl) mapped[mnT(a) + ',' + a.row + ',' + a.col] = lbl;
+  });
+
+  // 표 경계 박스(다중 표 구분용)
+  let bounds = '';
+  mnEditor.tables.forEach(t => {
+    bounds += `<div class="mn-table-box" style="left:${t.nx * 100}%;top:${t.ny * 100}%;`
+      + `width:${t.nw * 100}%;height:${t.nh * 100}%"><span class="mn-table-tag">표 ${t.table + 1}</span></div>`;
   });
 
   let boxes = '';
   mnEditor.grid.forEach(c => {
-    const k = c.row + ',' + c.col;
+    const k = c.table + ',' + c.row + ',' + c.col;
     const txt = (c.text || '').slice(0, 36);
     const body = txt ? esc(txt) : '';
     boxes += `<div class="mn-cell-box${mapped[k] ? ' mapped' : ''}" `
@@ -2180,10 +2203,12 @@ function renderMapCanvas() {
   let pins = '';
   mnEditor.annotations.forEach(a => {
     const [nx, ny] = mnPinPos(a);
-    const lbl = a.slot ? MN_SLOT_LABELS[a.slot] : (a.label || '핀');
-    const active = mnEditor.activePin && mnEditor.activePin[0] === a.row && mnEditor.activePin[1] === a.col;
+    const lbl = mnItemLabel(a) || '핀';
+    const ap = mnEditor.activePin;
+    const active = ap && ap[0] === mnT(a) && ap[1] === a.row && ap[2] === a.col;
     pins += `<div class="mn-pin${a.slot ? ' std' : ''}${active ? ' active' : ''}" `
-      + `data-row="${a.row}" data-col="${a.col}" style="left:${nx * 100}%;top:${ny * 100}%" `
+      + `data-table="${mnT(a)}" data-row="${a.row}" data-col="${a.col}" `
+      + `style="left:${nx * 100}%;top:${ny * 100}%" `
       + `title="${esc(a.comment || '')}"><span class="mn-pin-dot">📌</span>`
       + `<span class="mn-pin-label">${esc(lbl)}</span></div>`;
   });
@@ -2193,40 +2218,41 @@ function renderMapCanvas() {
     layer = el('div'); layer.id = 'mn-map-layer';
     canvas.insertBefore(layer, canvas.firstChild);
   }
-  layer.innerHTML = boxes + pins;
+  layer.innerHTML = bounds + boxes + pins;
 }
 
-/* 캔버스 클릭 → 정규화 좌표 → 셀 역추적 → 핀 upsert → 팝오버 */
+/* 캔버스 클릭 → 정규화 좌표 → 셀 역추적(table,row,col) → 핀 upsert → 팝오버 */
 function onCanvasClick(e) {
   if (e.target.closest('#mn-pin-pop')) return;   // 팝오버 내부 클릭 무시
   const canvas = $('#mn-map-canvas');
   const rect = canvas.getBoundingClientRect();
   const pinEl = e.target.closest('.mn-pin');
-  let r, c, nx, ny;
+  let t, r, c, nx, ny;
   if (pinEl) {           // 기존 핀 클릭 → 위치 유지하고 편집
-    r = +pinEl.dataset.row; c = +pinEl.dataset.col;
-    const a = mnFindAnn(r, c); [nx, ny] = mnPinPos(a);
+    t = +pinEl.dataset.table; r = +pinEl.dataset.row; c = +pinEl.dataset.col;
+    const a = mnFindAnn(t, r, c); [nx, ny] = mnPinPos(a);
   } else {
     nx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
     ny = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
     const hit = mnHitTest(nx, ny);
     if (!hit) { toast('표 영역 안을 클릭하세요', 'warn'); return; }
-    [r, c] = hit;
-    const a = mnFindAnn(r, c);
+    [t, r, c] = hit;
+    const a = mnFindAnn(t, r, c);
     if (a) { a.nx = nx; a.ny = ny; }   // 1셀=1핀: 같은 셀 재클릭 → 위치 갱신
-    else mnEditor.annotations.push({ row: r, col: c, label: '', comment: '', nx, ny });
+    else mnEditor.annotations.push({ table: t, row: r, col: c, label: '', comment: '', nx, ny });
   }
-  mnEditor.activePin = [r, c];
+  mnEditor.activePin = [t, r, c];
   renderMapCanvas();
-  openPinPop(r, c, nx, ny);
+  openPinPop(t, r, c, nx, ny);
 }
 
-/* point-in-rect (정규화) — 기하 bbox는 Python이 산출, JS는 hit-test만 */
+/* point-in-rect (정규화) — 기하 bbox는 Python이 산출, JS는 hit-test만.
+   전체 캔버스 좌표 → 포함 셀의 [table,row,col] (다중 표 구분). */
 function mnHitTest(nx, ny) {
   for (const c of mnEditor.grid)
-    if (c.nx <= nx && nx < c.nx + c.nw && c.ny <= ny && ny < c.ny + c.nh) return [c.row, c.col];
+    if (c.nx <= nx && nx < c.nx + c.nw && c.ny <= ny && ny < c.ny + c.nh) return [c.table, c.row, c.col];
   for (const c of mnEditor.grid)   // 엣지 폴백(닫힘)
-    if (c.nx <= nx && nx <= c.nx + c.nw && c.ny <= ny && ny <= c.ny + c.nh) return [c.row, c.col];
+    if (c.nx <= nx && nx <= c.nx + c.nw && c.ny <= ny && ny <= c.ny + c.nh) return [c.table, c.row, c.col];
   return null;
 }
 
@@ -2238,10 +2264,11 @@ function mnBuildSlotOptions() {
 }
 
 /* 핀 팝오버 — 슬롯/커스텀 라벨 지정 */
-function openPinPop(r, c, nx, ny) {
-  const a = mnFindAnn(r, c);
+function openPinPop(t, r, c, nx, ny) {
+  const a = mnFindAnn(t, r, c);
   const pop = $('#mn-pin-pop');
-  $('#mn-pop-cell').textContent = `(${r}, ${c})`;
+  $('#mn-pop-cell').textContent = mnEditor.tables.length > 1
+    ? `표${t + 1} (${r}, ${c})` : `(${r}, ${c})`;
   const sel = $('#mn-pop-slot');
   sel.value = a && a.slot ? a.slot : (a && a.label ? '__custom__' : '');
   $('#mn-pop-label').value = (a && !a.slot && a.label) ? a.label : '';
@@ -2262,8 +2289,8 @@ function hidePinPop() { $('#mn-pin-pop').classList.add('hidden'); mnEditor.activ
 
 function savePinPop() {
   if (!mnEditor.activePin) return;
-  const [r, c] = mnEditor.activePin;
-  const a = mnFindAnn(r, c);
+  const [t, r, c] = mnEditor.activePin;
+  const a = mnFindAnn(t, r, c);
   if (!a) { hidePinPop(); return; }
   const sel = $('#mn-pop-slot').value;
   const comment = $('#mn-pop-comment').value.trim();
@@ -2272,6 +2299,7 @@ function savePinPop() {
   if (sel && sel !== '__custom__') {                 // 표준 슬롯 — 슬롯당 1셀 보장
     mnEditor.annotations.forEach(x => { if (x !== a && x.slot === sel) delete x.slot; });
     a.slot = sel; a.label = MN_SLOT_LABELS[sel];
+    if (t !== 0) toast(`표${t + 1}의 '${MN_SLOT_LABELS[sel]}' — 표준 항목은 첫 번째 표만 생성에 반영됩니다`, 'warn', 6000);
   } else if (sel === '__custom__') {                 // 커스텀 라벨
     if (!customLabel) { toast('커스텀 라벨을 입력하세요', 'warn'); return; }
     delete a.slot; a.label = customLabel;
@@ -2284,29 +2312,72 @@ function savePinPop() {
 }
 function delPinPop() {
   if (!mnEditor.activePin) return;
-  const [r, c] = mnEditor.activePin;
-  mnEditor.annotations = mnEditor.annotations.filter(a => !(a.row === r && a.col === c));
+  const [t, r, c] = mnEditor.activePin;
+  mnEditor.annotations = mnEditor.annotations.filter(a => !(mnT(a) === t && a.row === r && a.col === c));
   hidePinPop();
   renderMapCanvas(); renderSlotStatus();
 }
 
-/* 우측 요약 — 표준 7항목 매핑 현황 + 커스텀 핀 목록 */
+/* 항목 표시 라벨 — 사용자가 바꾼 라벨 우선, 없으면 표준 기본 라벨(표준 항목은 항상 라벨 보유) */
+function mnItemLabel(a) {
+  return (a.label && a.label.trim()) || (a.slot ? MN_SLOT_LABELS[a.slot] : '');
+}
+/* 상단 고정 항목 = 슬롯 또는 라벨이 있는 핀(메모만·회의내용 제외). 배열 순서가 표시 순서.
+   content(회의 내용)는 본문 블록이라 자유 편집에서 분리 — 항상 기본 라벨·기본 셀로 고정 표시. */
+function mnNamedItems() {
+  return mnEditor.annotations.filter(a =>
+    a.slot !== 'content' && (a.slot || (a.label && a.label.trim())));
+}
+function mnContentItem() { return mnEditor.annotations.find(a => a.slot === 'content'); }
+function mnRenameItem(idx, value) {   // input(live) — 핀 라벨만 갱신, 리스트 재렌더는 blur(change)에서
+  const a = mnNamedItems()[idx]; if (!a) return;
+  const v = (value || '').trim();
+  if (!a.slot && !v) return;          // 커스텀은 빈 라벨 불가(메모핀으로 강등 방지) — blur 시 원복
+  a.label = v;                        // 표준은 빈 값이면 mnItemLabel 이 기본 라벨로 폴백
+  renderMapCanvas();
+}
+function mnReorderItem(idx, dir) {
+  const named = mnNamedItems(), j = idx + dir;
+  if (j < 0 || j >= named.length) return;
+  [named[idx], named[j]] = [named[j], named[idx]];
+  const others = mnEditor.annotations.filter(a => !named.includes(a));   // content·메모핀 보존
+  mnEditor.annotations = named.concat(others);   // 명명 항목 순서 + 나머지(순서 무관)
+  renderMapCanvas(); renderSlotStatus();
+}
+function mnDeleteItem(idx) {
+  const a = mnNamedItems()[idx]; if (!a) return;
+  mnEditor.annotations = mnEditor.annotations.filter(x => x !== a);
+  renderMapCanvas(); renderSlotStatus();
+}
+
+/* 우측 패널 — 상단 고정 항목 편집형 리스트(이름변경·순서·삭제). 표준/커스텀 모두 자유 편집. */
 function renderSlotStatus() {
-  const m = mnDeriveCellMap();
-  let html = MN_SLOT_ORDER.map(s => {
-    const rc = m[s];
-    return `<div class="mn-status-row${rc ? ' on' : ''}">
-      <span class="mn-status-label">${esc(MN_SLOT_LABELS[s])}</span>
-      <span class="mn-status-val">${rc ? `(${rc[0]},${rc[1]})` : '미지정'}</span></div>`;
-  }).join('');
-  const customs = mnEditor.annotations.filter(a => !a.slot && a.label);
-  if (customs.length) {
-    html += '<div class="mn-status-sep">커스텀 라벨</div>'
-      + customs.map(a => `<div class="mn-status-row on">
-          <span class="mn-status-label">★ ${esc(a.label)}</span>
-          <span class="mn-status-val">(${a.row},${a.col})</span></div>`).join('');
-  }
-  $('#mn-map-status').innerHTML = html;
+  const box = $('#mn-map-status');
+  const multi = mnEditor.tables.length > 1;
+  // 회의 내용 — 삭제·이름변경 불가 고정 행(셀은 양식 그림 클릭으로 지정). 항상 맨 위.
+  const cont = mnContentItem();
+  const ccoord = cont ? (multi ? `표${mnT(cont) + 1} ` : '') + `(${cont.row},${cont.col})` : '미지정';
+  const fixedRow = `<div class="mn-item-row fixed">
+      <span class="mn-item-fixedlabel">회의 내용</span>
+      <span class="mn-item-tag std">고정</span>
+      <span class="mn-item-coord${cont ? '' : ' off'}">${ccoord}</span>
+    </div>`;
+  const items = mnNamedItems();
+  const rows = items.length ? items.map((a, i) => {
+    const kind = a.slot ? 'std' : 'custom';
+    const coord = (multi ? `표${mnT(a) + 1} ` : '') + `(${a.row},${a.col})`;
+    const tip = a.slot ? '표준 항목 — 이름은 표시용(값은 자동 연결)' : '커스텀 항목';
+    return `<div class="mn-item-row ${kind}">
+      <input class="mn-item-label" data-idx="${i}" value="${esc(mnItemLabel(a))}" title="${tip}">
+      <span class="mn-item-tag ${kind}">${a.slot ? '표준' : '커스텀'}</span>
+      <span class="mn-item-coord">${coord}</span>
+      <button class="mn-item-btn" data-act="up" data-idx="${i}" title="위로">▲</button>
+      <button class="mn-item-btn" data-act="down" data-idx="${i}" title="아래로">▼</button>
+      <button class="mn-item-btn del" data-act="del" data-idx="${i}" title="삭제">✕</button>
+    </div>`;
+  }).join('')
+    : '<div class="mn-item-empty">그 외 항목이 없습니다. 양식 그림을 클릭해 추가하세요.</div>';
+  box.innerHTML = fixedRow + rows;
 }
 
 /* 편집기 내 [AI 자동 매핑] — 언제든 재호출 가능. 표준 슬롯 핀만 AI 결과로 갱신하고
@@ -2347,6 +2418,8 @@ async function saveMinutesMapping() {
   const r = await call('save_minutes_cellmap', tpl, mnDeriveCellMap(), [], mnEditor.annotations);
   overlay(false);
   if (!r.ok) { toast(r.error || '매핑 저장 실패', 'err', 5000); return; }
+  const off = mnStdSlotsOffTable0();   // AI/구버전 매핑 유입분 포함 — 저장 시에도 유실 가시화
+  if (off.length) toast(`${off.join(', ')} — 첫 번째 표 밖이라 생성 시 반영되지 않습니다`, 'warn', 6000);
   mnEditor.annotations = r.annotations || [];   // 백엔드 정규화본(1셀1핀·nx,ny 보존)
   mnEditor.cache[tpl] = { annotations: clone(mnEditor.annotations) };
   const unmapped = (r.unmapped || []).map(s => MN_SLOT_LABELS[s] || s);
@@ -2359,6 +2432,39 @@ async function saveMinutesMapping() {
   box.textContent = msg;
   toast('매핑이 저장됐습니다', 'ok');
   renderMapCanvas(); renderSlotStatus();
+}
+
+/* 항목 자동 인식 — AI가 라벨 칸을 분석해 입력 칸에 항목 핀 자동 생성.
+   기존 핀이 있는 셀은 건너뛰고 빈 셀에만 추가(1셀=1핀). */
+async function autoLabelMinutesForm() {
+  const tpl = mnEditor.templatePath;
+  if (!tpl) return;
+  if (!aiKeySet()) {
+    toast('AI 키가 없어 자동 인식을 쓸 수 없습니다 (설정에서 키 입력)', 'warn', 5000);
+    return;
+  }
+  overlay(true, '항목 자동 인식 중...');
+  const r = await call('auto_label_minutes_form', tpl);
+  overlay(false);
+  if (!r.ok) { toast(r.error || '항목 자동 인식 실패', 'err', 5000); return; }
+  let added = 0, skipped = 0;
+  (r.pins || []).forEach(p => {
+    const t = p.table || 0;
+    if (mnFindAnn(t, p.row, p.col)) { skipped++; return; }   // 기존 핀 셀 건너뜀
+    mnEditor.annotations.push({
+      table: t, row: p.row, col: p.col,
+      label: p.label, comment: '', nx: p.nx, ny: p.ny,
+    });
+    added++;
+  });
+  renderMapCanvas(); renderSlotStatus();
+  if (added) {
+    let msg = `${added}개 항목을 자동 인식했습니다`;
+    if (skipped) msg += ` (기존 핀 ${skipped}개 유지)`;
+    toast(msg + ' — 확인 후 매핑 저장하세요', 'ok', 5000);
+  } else {
+    toast('자동 인식된 새 항목이 없습니다', 'warn');
+  }
 }
 
 /* ===================================================================
@@ -2558,6 +2664,7 @@ async function init() {
   $('#mn-map-cancel').addEventListener('click', () => $('#mn-map-modal').classList.add('hidden'));
   $('#mn-map-save').addEventListener('click', saveMinutesMapping);
   $('#mn-map-ai').addEventListener('click', runMinutesAiAutoMap);
+  $('#mn-map-autolabel').addEventListener('click', autoLabelMinutesForm);
   $('#mn-map-canvas').addEventListener('click', onCanvasClick);
   $('#mn-pop-slot').addEventListener('change', mnTogglePopCustom);
   $('#mn-pop-save').addEventListener('click', savePinPop);
@@ -2638,8 +2745,19 @@ async function init() {
   });
   $('#mn-r-back').addEventListener('click', () => showMinutesStep(1));
   $('#mn-r-add-participant').addEventListener('click', () => addParticipantRow(''));
-  $('#mn-r-add-section').addEventListener('click', () => addSectionRow('bullet', ''));
   $('#mn-r-gen').addEventListener('click', generateMinutes);
+  // 상단 고정 항목 리스트 — 이름변경(input)·순서/삭제(click) 위임
+  $('#mn-map-status').addEventListener('input', e => {
+    const inp = e.target.closest('.mn-item-label'); if (inp) mnRenameItem(+inp.dataset.idx, inp.value);
+  });
+  $('#mn-map-status').addEventListener('change', e => {
+    if (e.target.closest('.mn-item-label')) renderSlotStatus();
+  });
+  $('#mn-map-status').addEventListener('click', e => {
+    const btn = e.target.closest('.mn-item-btn'); if (!btn) return;
+    const idx = +btn.dataset.idx, act = btn.dataset.act;
+    if (act === 'del') mnDeleteItem(idx); else mnReorderItem(idx, act === 'up' ? -1 : 1);
+  });
 
   // 설정
   $('#s-price-year').addEventListener('change', e => renderPriceTable(e.target.value));

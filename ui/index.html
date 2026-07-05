@@ -265,7 +265,7 @@
 
         <div class="card form-card">
           <h3>회의 메모 <span class="h-sub">녹음 전사본, 요점 등을 붙여넣으세요</span></h3>
-          <textarea id="mn-memo" rows="10" placeholder="회의에서 논의된 내용을 자유롭게 입력하세요.&#10;녹음 전사본을 그대로 붙여넣어도 됩니다.&#10;파일로 첨부하려면 아래 드롭존을 이용하세요."></textarea>
+          <textarea id="mn-memo" rows="6" placeholder="회의에서 논의된 내용을 자유롭게 입력하세요.&#10;녹음 전사본을 그대로 붙여넣어도 됩니다.&#10;파일로 첨부하려면 아래 드롭존을 이용하세요."></textarea>
         </div>
 
         <div class="card form-card">
@@ -309,10 +309,9 @@
         </div>
 
         <div class="card form-card">
-          <h3>회의 내용 <span class="h-sub">항목 수정·추가·삭제</span>
-            <button id="mn-r-add-section" class="btn btn-mini" type="button">＋ 항목 추가</button>
-          </h3>
-          <div id="mn-r-sections" class="mn-sections"></div>
+          <h3>회의 내용 <span class="h-sub"># 제목 · - 항목 · 들여쓰기 하위 · 빈 줄</span></h3>
+          <textarea id="mn-r-content-text" class="mn-content-text" rows="14" spellcheck="false"
+            placeholder="# 안건 검토&#10;- 일정 확정&#10;  - 7월 2주차 착수&#10;&#10;# 결정 사항&#10;- 예산 재배정 승인"></textarea>
         </div>
 
         <div id="mn-r-status" class="ai-status"></div>
@@ -719,14 +718,17 @@
         </div>
       </div>
       <div class="mn-map-side">
-        <h4 class="mn-map-side-h">표준 항목 매핑
+        <h4 class="mn-map-side-h">상단 고정 항목 <span class="h-sub">이름·순서 자유 편집</span>
           <button id="mn-map-ai" class="btn btn-mini btn-violet" type="button" title="AI가 표를 다시 분석해 표준 항목 핀을 채웁니다">✦ AI 자동 매핑</button>
         </h4>
+        <p class="mn-map-side-hint">양식 그림을 클릭해 항목을 추가하세요. 표준 항목 이름은 표시용입니다(값은 자동 연결).</p>
         <div class="mn-map-status" id="mn-map-status"></div>
       </div>
     </div>
     <div id="mn-map-warn" class="ai-status"></div>
     <div class="modal-actions">
+      <button id="mn-map-autolabel" class="btn btn-ghost mn-map-autolabel" type="button"
+        title="이미 추출된 셀 라벨을 AI가 분석해 입력 칸에 항목 핀을 자동 생성합니다">✨ 항목 자동 인식</button>
       <button id="mn-map-cancel" class="btn btn-ghost" type="button">닫기</button>
       <button id="mn-map-save" class="btn btn-primary" type="button">매핑 저장</button>
     </div>

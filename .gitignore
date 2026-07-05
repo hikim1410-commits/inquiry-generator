@@ -2,6 +2,8 @@
 build/
 dist/
 build-out.log
+build-out-*.log
+venv-install.log
 output/
 
 # 파이썬 캐시
@@ -14,11 +16,17 @@ config.json
 token.json
 client_secret.json
 app-log.txt
+app-run.log
 run-log.txt
 kordoc-runtime/
+minutes_templates/
+
+# 작업 스크린샷
+map-editor-*.png
 
 # 에디터/도구
 .claude/
+.fablize/
 
 # Windows 특수 장치명 (실수로 생성된 경우)
 nul

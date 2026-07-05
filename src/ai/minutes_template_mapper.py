@@ -35,8 +35,9 @@ MINUTES_SLOTS = {
 _PROMPT_TMPL = """당신은 한글(HWPX) 회의록 표 양식 분석가입니다.
 
 아래는 회의록 양식 표의 모든 셀입니다. 각 셀은 (행,열): 텍스트 형식이며,
-텍스트는 라벨(예: "사업명", "일 시")이거나 기존 샘플값입니다.
-보통 라벨 셀 옆/아래의 빈 셀 또는 샘플값 셀이 실제 '값이 들어갈 셀'입니다.
+텍스트는 라벨(예: "사업명", "일 시")이거나 기존 샘플값, 값이 없으면 (빈 셀)입니다.
+값이 들어갈 셀은 보통 라벨 셀의 **바로 오른쪽(같은 행, 열+1)** 또는 **바로 아래(행+1)**의
+빈 셀(또는 샘플값 셀)입니다.
 
 ## 표 셀 목록
 {grid}
@@ -46,7 +47,8 @@ _PROMPT_TMPL = """당신은 한글(HWPX) 회의록 표 양식 분석가입니다
 
 ## 작업
 각 표준 슬롯에 대해, 그 값이 실제로 입력될 셀의 좌표 [행, 열]을 cell_map으로 반환하세요.
-- 라벨 셀(예: "사업명"이라고 적힌 셀)이 아니라, 값이 들어갈 셀의 좌표를 지정합니다.
+- 라벨 셀(예: "사업명"이라고 적힌 셀)이 아니라, 그 **오른쪽/아래의 값 셀** 좌표를 지정합니다.
+- 우선순위: 라벨 셀의 ① 오른쪽 셀 → ② 아래 셀. 이미 다른 라벨 텍스트가 있는 셀은 고르지 마세요.
 - 좌표는 위 목록의 (행,열) 숫자를 그대로 사용합니다.
 - 적절한 셀을 찾을 수 없는 슬롯은 cell_map에 넣지 말고 unmapped에 슬롯명을 넣으세요.
 - 슬롯명을 임의로 만들지 않습니다(목록의 7개만 사용).
@@ -95,6 +97,74 @@ def map_minutes_cells(grid_cells: list, provider: str = "gemini",
         if slot not in cell_map and slot not in unmapped:
             unmapped.append(slot)
     return {"ok": True, "cell_map": cell_map, "unmapped": unmapped}
+
+
+_AUTO_PROMPT_TMPL = """당신은 한글(HWPX) 양식(회의록·상담일지 등) 표 분석가입니다.
+아래는 양식의 모든 표 셀입니다. 각 셀은 `(표,행,열): 텍스트` 형식이며, 값이 없으면 `(빈 셀)`입니다.
+
+## 개념
+- '라벨 칸' = 항목 이름이 적힌 셀(예: "회사명", "제품명", "상담내용", "일 시", "참석자").
+- '입력 칸' = 그 값이 들어갈 **빈 셀**. 보통 라벨 칸의 **바로 오른쪽(같은 행, 열+1)** 또는
+  **바로 아래(행+1, 같은 열)**에 있습니다.
+
+## 규칙 (정확도 핵심)
+- 각 라벨 칸마다 **같은 표 안**에서 인접한 **빈 셀**을 입력 칸으로 고릅니다(표 번호를 바꾸지 마세요).
+- 우선순위: ① 오른쪽 빈 셀 → ② 아래 빈 셀.
+- **이미 텍스트가 있는 셀은 입력 칸으로 고르지 마세요**(그건 다른 라벨/제목/머리글입니다).
+- 한 입력 칸에는 항목 하나만(좌표 중복 금지). 라벨 칸 자신을 입력 칸으로 반환하지 마세요.
+- 인접한 빈 셀이 없거나 라벨이 불분명하면 그 항목은 **건너뜁니다**(억지로 만들지 않음).
+- 좌표 숫자는 위 목록의 값을 그대로 사용합니다.
+
+## 표 셀 목록
+{grid}
+
+## 작업
+각 라벨 칸의 입력 칸 (표,행,열)과 항목명(라벨 텍스트 그대로)을 pins로 반환하세요.
+JSON으로만 답하세요:
+{{"pins": [{{"table": 0, "row": 0, "col": 1, "label": "회사명"}}, ...]}}
+"""
+
+
+def auto_label_cells(grid_cells: list, provider: str = "gemini",
+                     api_key: str = "", model: str = "gemini-flash-latest",
+                     timeout: int = 30) -> dict:
+    """라벨 칸을 AI로 식별해 대응 입력 칸에 항목명 핀을 생성 (비표준 양식용).
+
+    map_minutes_cells(표준 7슬롯)와 달리 임의 항목명을 자동 라벨링한다.
+    반환: {"ok": bool, "pins": [{table,row,col,label}], "error"?: str}
+      - 실제 grid에 존재하는 (table,row,col)만 수용, 중복 좌표·빈 라벨 제거(1셀=1핀).
+      - 키 없으면 {ok:False, error:"AI 키 없음", pins:[]}.
+    """
+    if not api_key:
+        return {"ok": False, "error": "AI 키 없음", "pins": []}
+
+    grid_lines = "\n".join(
+        f"  ({c.get('table', 0)},{c['row']},{c['col']}): {c.get('text') or '(빈 셀)'}"
+        for c in grid_cells)
+    prompt = _AUTO_PROMPT_TMPL.format(grid=grid_lines)
+
+    r = llm.complete_json(provider, api_key, model, prompt, schema=None, timeout=timeout)
+    if not r.get("ok"):
+        return {"ok": False, "error": r.get("error", "AI 호출 실패"), "pins": []}
+
+    data = r.get("data") or {}
+    valid = {(c.get("table", 0), c["row"], c["col"]) for c in grid_cells}
+    pins, seen = [], set()
+    for p in (data.get("pins") or []):
+        if not isinstance(p, dict):
+            continue
+        try:
+            t, row, col = int(p["table"]), int(p["row"]), int(p["col"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        label = p.get("label")
+        if not isinstance(label, str) or not label.strip():
+            continue
+        if (t, row, col) not in valid or (t, row, col) in seen:
+            continue
+        seen.add((t, row, col))
+        pins.append({"table": t, "row": row, "col": col, "label": label.strip()})
+    return {"ok": True, "pins": pins}
 
 
 def is_standard_map(cell_map: dict) -> bool:
@@ -190,9 +260,10 @@ def _validate_custom_slots(custom_slots) -> tuple:
 
 
 def _validate_annotations(annotations) -> tuple:
-    """annotations [{row, col, label, comment, slot?}] 검증. (정규화 리스트, 경고).
+    """annotations [{table, row, col, label, comment, slot?}] 검증. (정규화 리스트, 경고).
 
-    9-e 1셀=1핀: 동일 (row,col)에 두 번째 핀은 거부(첫 핀만 유지).
+    9-e 1셀=1핀: 동일 (table,row,col)에 두 번째 핀은 거부(첫 핀만 유지).
+    table 기본 0(구버전 annotation 후방호환 — 단일 표 = table 0).
     정수 좌표·라벨 문자열 검증. 잘못된 항목은 무시·경고.
     """
     out, warnings, seen = [], [], set()
@@ -205,15 +276,19 @@ def _validate_annotations(annotations) -> tuple:
         except (TypeError, ValueError, KeyError):
             warnings.append("annotation 좌표 오류 — 무시")
             continue
+        try:
+            tbl = int(a.get("table", 0))
+        except (TypeError, ValueError):
+            tbl = 0
         label = a.get("label", "")
         if not isinstance(label, str):
-            warnings.append(f"annotation ({r},{c}) 라벨 타입 오류 — 무시")
+            warnings.append(f"annotation ({tbl},{r},{c}) 라벨 타입 오류 — 무시")
             continue
-        if (r, c) in seen:
-            warnings.append(f"annotation ({r},{c}) 중복 핀 거부 (1셀=1핀)")
+        if (tbl, r, c) in seen:
+            warnings.append(f"annotation ({tbl},{r},{c}) 중복 핀 거부 (1셀=1핀)")
             continue
-        seen.add((r, c))
-        item = {"row": r, "col": c, "label": label,
+        seen.add((tbl, r, c))
+        item = {"table": tbl, "row": r, "col": c, "label": label,
                 "comment": str(a.get("comment", "") or "")}
         slot = a.get("slot")
         if isinstance(slot, str) and slot.strip():
