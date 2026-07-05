@@ -27,6 +27,13 @@ def _err(msg, **kw):
     return {"ok": False, "error": str(msg), **kw}
 
 
+def _file_dialog(webview_mod, kind):
+    """pywebview 6.x: webview.FileDialog.{OPEN,SAVE,FOLDER} enum.
+    requirements.txt는 >=5.0(느슨)이라 구버전 상수(OPEN_DIALOG 등)로 폴백."""
+    fd = getattr(webview_mod, "FileDialog", None)
+    return getattr(fd, kind) if fd else getattr(webview_mod, f"{kind}_DIALOG")
+
+
 # AI 초안 기초 지침 최대 길이 (config 비대화·실수 붙여넣기 방지)
 _AI_PROMPT_MAX = 8000
 
@@ -339,7 +346,7 @@ class Api:
         quote는 last_folder도 동기 기록(하위호환)."""
         try:
             import webview
-            res = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+            res = self._window.create_file_dialog(_file_dialog(webview, "FOLDER"))
             if not res:
                 return {"ok": False, "cancelled": True}
             folder = res[0] if isinstance(res, (list, tuple)) else str(res)
@@ -848,7 +855,7 @@ class Api:
         try:
             import webview
             result = self._window.create_file_dialog(
-                webview.OPEN_DIALOG,
+                _file_dialog(webview, "OPEN"),
                 allow_multiple=False,
                 file_types=("HWP 파일 (*.hwp)",),
             )
@@ -915,7 +922,7 @@ class Api:
         try:
             import webview
             result = self._window.create_file_dialog(
-                webview.OPEN_DIALOG,
+                _file_dialog(webview, "OPEN"),
                 allow_multiple=True,
                 file_types=(
                     "문서 파일 (*.hwp;*.hwpx;*.hml;*.pdf;*.docx;*.xlsx;*.xls;*.txt;*.md)",
@@ -1070,7 +1077,15 @@ class Api:
             except Exception as e:
                 warn = f"재편집 데이터 저장 실패: {e}"
                 _log(warn)
-            out = {"ok": True, "path": res["path"], "json_path": json_path}
+            # Drive 자동 업로드 (옵션 ON + 연결됨) — 회의록은 HWPX 1개만
+            drive = None
+            try:
+                if self.cfg.get("drive", {}).get("auto") and gdrive.status().get("connected"):
+                    drive = self.drive_upload([res["path"]])
+            except Exception as e:
+                drive = {"ok": False, "error": str(e)}
+            out = {"ok": True, "path": res["path"], "json_path": json_path,
+                   "drive": drive}
             if warn:
                 out["warning"] = warn
             return out
@@ -1332,7 +1347,7 @@ class Api:
         try:
             import webview
             result = self._window.create_file_dialog(
-                webview.OPEN_DIALOG,
+                _file_dialog(webview, "OPEN"),
                 allow_multiple=False,
                 file_types=("HWPX 파일 (*.hwpx)", "모든 파일 (*.*)"),
             )

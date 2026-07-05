@@ -1440,7 +1440,7 @@ async function initMinutesTemplateStatus() {
       : `커스텀 양식 — AI 분석 적용됨 (${r.mapped}개 셀 매핑${(r.unmapped || []).length ? `, 미매핑 ${r.unmapped.length}개` : ''})`;
     _mnTplPath = r.path; $('#btn-scan-mn-tpl').disabled = false;
   } else {
-    $('#mn-tpl-status').textContent = '커스텀 양식 — [분석·적용]으로 표 구조를 분석하세요.';
+    $('#mn-tpl-status').textContent = '커스텀 양식 — [매핑 편집]으로 항목을 매핑하세요.';
     _mnTplPath = r.path; $('#btn-scan-mn-tpl').disabled = false;
   }
 }
@@ -1452,7 +1452,7 @@ async function pickMinutesTemplate() {
   if (!r2.ok) { toast(r2.error || '양식 저장 실패', 'err'); return; }
   _mnTplPath = r.path;
   $('#mn-tpl-name').textContent = r.path.split(/[/\\]/).pop();
-  $('#mn-tpl-status').textContent = '커스텀 양식 적용됨 — [분석·적용]으로 표 구조를 분석하세요.';
+  $('#mn-tpl-status').textContent = '커스텀 양식 적용됨 — [매핑 편집]으로 항목을 매핑하세요.';
   $('#btn-scan-mn-tpl').disabled = false;
   $('#mn-tpl-scan-result').classList.add('hidden');
   toast('회의록 양식이 변경됐습니다', 'ok');
@@ -1722,6 +1722,7 @@ async function reEditMinutes(jsonPath) {
   if (!r.ok) { toast(r.error || '불러오기 실패', 'err'); return; }
   _minutesComposeInited = true;   // lazy-init이 위저드를 리셋하지 않도록 선세트
   minutesDraft = r.data;
+  await loadActiveCustomSlots();
   renderMinutesReview(minutesDraft);
   showMinutesStep(2);
   switchView('minutes', 'compose');
@@ -1732,7 +1733,8 @@ async function reEditMinutes(jsonPath) {
 =================================================================== */
 let minutesAttachments = [];  // [{ name, markdown, chars }]
 let minutesDraft = null;      // 검토 중인 MINUTES_SCHEMA 초안
-let _unmappedWarned = false;  // 미매핑 경고 1회 노출 후 진행 허용(T-F3)
+let mnActiveCustomSlots = []; // 활성 양식의 custom_slots — 위저드 2단계 커스텀 입력칸용(A-2)
+let _mnGenConfirmData = null; // 미매핑 확인 모달에 보류 중인 생성 payload(data)
 
 /* 드롭존 상태·배선·변환·칩 렌더는 견적 AI와 공용 헬퍼 사용
    (setDropzoneState / wireDropzone / convertInto / renderChips) */
@@ -1777,6 +1779,7 @@ async function runMinutesDraft() {
   if (r.warnings && r.warnings.length) toast(r.warnings.join(' / '), 'warn', 5000);
   setMnStatus('');
   minutesDraft = r.draft;
+  await loadActiveCustomSlots();
   renderMinutesReview(minutesDraft);
   showMinutesStep(2);
 }
@@ -1796,6 +1799,8 @@ function renderMinutesReview(draft) {
 
   // 회의 내용 — 마크업 텍스트로 채움(# 제목 / - 항목 / 들여쓰기 하위 / 빈 줄)
   $('#mn-r-content-text').value = sectionsToText(draft.sections || []);
+
+  renderMinutesCustomFields(draft.custom_fields);
 
   const rStatus = $('#mn-r-status');
   if (rStatus) { rStatus.textContent = ''; rStatus.className = 'ai-status'; }
@@ -1837,6 +1842,8 @@ function collectMinutesPayload() {
   const participants = Array.from($('#mn-r-participants').querySelectorAll('.mn-part-row input'))
     .map(i => i.value.trim()).filter(Boolean);
   const sections = parseSectionsText($('#mn-r-content-text').value);
+  const custom_fields = {};
+  $$('#mn-r-custom-fields [data-custom-id]').forEach(inp => { custom_fields[inp.dataset.customId] = inp.value.trim(); });
   return {
     business_name: $('#mn-r-business').value.trim(),
     meeting_date:  $('#mn-r-date').value.trim(),
@@ -1845,7 +1852,27 @@ function collectMinutesPayload() {
     participants,
     total_count:   parseInt($('#mn-r-total').value || '0', 10) || 0,
     sections,
+    custom_fields,
   };
+}
+
+/* 활성 회의록 양식의 custom_slots를 불러와 위저드 2단계 입력칸 렌더에 사용(A-2) */
+async function loadActiveCustomSlots() {
+  const t = await call('get_minutes_template');
+  if (!t.ok || !t.path) { mnActiveCustomSlots = []; return; }
+  const sv = await call('load_minutes_cellmap', t.path);
+  mnActiveCustomSlots = (sv.ok && sv.custom_slots) || [];
+}
+
+/* 커스텀 항목 입력칸 렌더 — 활성 양식에 매핑된 항목이 없으면 카드 숨김 */
+function renderMinutesCustomFields(customFields) {
+  const card = $('#mn-r-custom-card');
+  const wrap = $('#mn-r-custom-fields');
+  if (!mnActiveCustomSlots.length) { card.classList.add('hidden'); wrap.innerHTML = ''; return; }
+  const cf = customFields || {};
+  wrap.innerHTML = mnActiveCustomSlots.map(s =>
+    `<label>${esc(s.label)} <input data-custom-id="${esc(s.id)}" value="${esc(cf[s.id] || '')}"></label>`).join('');
+  card.classList.remove('hidden');
 }
 
 async function generateMinutes() {
@@ -1855,21 +1882,30 @@ async function generateMinutes() {
     if (box) { box.textContent = '회의주제를 입력하세요.'; box.className = 'ai-status warn'; }
     return;
   }
-  // 미매핑 슬롯 경고 1회 — 활성 커스텀 양식에 미매핑이 있으면 빈 칸 생성 안내 후 진행 허용(A-5/C-2)
-  if (!_unmappedWarned) {
-    const t = await call('get_minutes_template');
-    const um = (t.ok && t.is_custom && !t.is_standard) ? (t.unmapped || []) : [];
-    if (um.length) {
-      _unmappedWarned = true;
-      const labels = um.map(s => MN_SLOT_LABELS[s] || s).join(', ');
-      const box = $('#mn-r-status');
-      if (box) {
-        box.textContent = `미매핑 항목(${labels})은 빈 칸으로 생성됩니다. 한 번 더 [회의록 HWPX 생성]을 누르면 그대로 진행합니다.`;
-        box.className = 'ai-status warn';
-      }
-      return;
-    }
+  // 미매핑 슬롯이 있으면 확인 모달로 경고 후 진행 여부를 묻는다(C-1) — 없으면 바로 생성
+  const t = await call('get_minutes_template');
+  const um = (t.ok && t.is_custom && !t.is_standard) ? (t.unmapped || []) : [];
+  if (um.length) {
+    const labels = um.map(s => MN_SLOT_LABELS[s] || s).join(', ');
+    openMnGenConfirm(`미매핑 항목(${labels})은 빈 칸으로 생성됩니다. 그대로 진행할까요?`, data);
+    return;
   }
+  await runGenerateMinutes(data);
+}
+
+function openMnGenConfirm(msg, data) {
+  _mnGenConfirmData = data;
+  $('#mn-gen-confirm-body').textContent = msg;
+  $('#mn-gen-confirm-modal').classList.remove('hidden');
+}
+function closeMnGenConfirm() { _mnGenConfirmData = null; $('#mn-gen-confirm-modal').classList.add('hidden'); }
+async function confirmMnGen() {
+  const data = _mnGenConfirmData;
+  closeMnGenConfirm();
+  if (data) await runGenerateMinutes(data);
+}
+
+async function runGenerateMinutes(data) {
   overlay(true, 'HWPX 생성 중...');
   const r = await call('generate_minutes', {
     data,
@@ -1892,7 +1928,6 @@ function initMinutesView() {
   renderMinutesChips();
   setMnStatus('');
   showMinutesStep(1);
-  _unmappedWarned = false;   // 새 작성 시작 시 미매핑 경고 재무장
   refreshConvertStatus();
 }
 
@@ -2085,18 +2120,27 @@ function mnDeriveCellMap() {   // 표준 슬롯이 지정된 핀(표 0만) → c
   });
   return m;
 }
-/* ponytail: build_minutes의 cell_map은 첫 표(표 0)만 지원 — 표>0 표준 핀은 생성물에 미반영.
-   엔진이 [table,row,col] 좌표를 받게 되면 이 경고와 위 표 0 필터를 함께 제거. */
-function mnStdSlotsOffTable0() {
+/* ponytail: build_minutes의 cell_map·custom_slots는 첫 표(표 0)만 지원 — 표>0 핀(표준·커스텀
+   모두)은 생성물에 미반영. 엔진이 [table,row,col] 좌표를 받게 되면 이 경고와 위 표 0 필터를 함께 제거. */
+function mnPinsOffTable0() {
   return mnEditor.annotations
-    .filter(a => a.slot && MN_SLOT_LABELS[a.slot] && mnT(a) !== 0)
-    .map(a => MN_SLOT_LABELS[a.slot]);
+    .filter(a => mnT(a) !== 0 && ((a.slot && MN_SLOT_LABELS[a.slot]) || (a.label && a.label.trim())))
+    .map(a => mnItemLabel(a));
+}
+
+/* 커스텀 라벨 핀(표 0, 슬롯 없음, 라벨 있음) → custom_slots [{id,label,cell}] 도출.
+   순수함수(mnEditor 전역이 아니라 annotations 배열을 인자로 받음) — 왕복 테스트 용이.
+   id는 좌표 기반("c행_열")이라 라벨을 바꿔도 안정적 — 재편집 시 custom_fields 값이 유지된다. */
+function mnDeriveCustomSlots(annotations) {
+  return (annotations || [])
+    .filter(a => (a.table || 0) === 0 && !a.slot && a.label && a.label.trim())
+    .map(a => ({ id: `c${a.row}_${a.col}`, label: a.label.trim(), cell: [a.row, a.col] }));
 }
 
 async function openMinutesMapEditor(templatePath, name) {
   if (!templatePath) { toast('편집할 양식 파일이 없습니다', 'warn'); return; }
   overlay(true, '양식 표 구조 분석 중...');
-  let gridResult = null, annotations = null;   // annotations=null → AI/오프라인 경로
+  let annotations = null;   // 캐시/저장본 없으면 오프라인 격자만 로드(빈 핀에서 시작) — AI는 명시 버튼으로만(C-2)
   const cached = mnEditor.cache[templatePath];
   let saved = null;
   if (!cached) {
@@ -2110,19 +2154,10 @@ async function openMinutesMapEditor(templatePath, name) {
     // 저장본에 annotations가 없고 cell_map만 있으면(구버전) cell_map을 핀으로 승격
     if (!annotations.length && saved.cell_map)
       annotations = mnCellMapToAnns(normCellMap(saved.cell_map));
-  } else if (aiKeySet()) {
-    const r = await call('scan_minutes_template', templatePath);
-    if (r.ok) {
-      gridResult = r.grid || null;
-      annotations = mnCellMapToAnns(normCellMap(r.cell_map));   // AI 제안을 초기 핀으로
-      if (r.ai_error) toast(`AI 매핑 일부 실패 — 핀으로 직접 완성하세요 (${r.ai_error})`, 'warn', 5000);
-    }
   }
-  if (!gridResult) {   // 오프라인/저장본 경로: 격자만 별도 로드 (geometry 포함)
-    const g = await call('scan_minutes_grid', templatePath);
-    if (!g.ok) { overlay(false); toast(g.error || '표 구조 분석 실패', 'err', 5000); return; }
-    gridResult = g;
-  }
+  const g = await call('scan_minutes_grid', templatePath);   // 격자는 항상 오프라인 스캔(geometry 포함)
+  if (!g.ok) { overlay(false); toast(g.error || '표 구조 분석 실패', 'err', 5000); return; }
+  const gridResult = g;
   overlay(false);
 
   mnEditor.templatePath = templatePath;
@@ -2415,10 +2450,11 @@ async function runMinutesAiAutoMap() {
 async function saveMinutesMapping() {
   const tpl = mnEditor.templatePath;
   overlay(true, '매핑 저장 중...');
-  const r = await call('save_minutes_cellmap', tpl, mnDeriveCellMap(), [], mnEditor.annotations);
+  const customSlots = mnDeriveCustomSlots(mnEditor.annotations);
+  const r = await call('save_minutes_cellmap', tpl, mnDeriveCellMap(), customSlots, mnEditor.annotations);
   overlay(false);
   if (!r.ok) { toast(r.error || '매핑 저장 실패', 'err', 5000); return; }
-  const off = mnStdSlotsOffTable0();   // AI/구버전 매핑 유입분 포함 — 저장 시에도 유실 가시화
+  const off = mnPinsOffTable0();   // AI/구버전 매핑 유입분 포함 — 저장 시에도 유실 가시화
   if (off.length) toast(`${off.join(', ')} — 첫 번째 표 밖이라 생성 시 반영되지 않습니다`, 'warn', 6000);
   mnEditor.annotations = r.annotations || [];   // 백엔드 정규화본(1셀1핀·nx,ny 보존)
   mnEditor.cache[tpl] = { annotations: clone(mnEditor.annotations) };
@@ -2746,6 +2782,10 @@ async function init() {
   $('#mn-r-back').addEventListener('click', () => showMinutesStep(1));
   $('#mn-r-add-participant').addEventListener('click', () => addParticipantRow(''));
   $('#mn-r-gen').addEventListener('click', generateMinutes);
+  // 미매핑 확인 모달 (C-1)
+  $('#mn-gen-confirm-cancel').addEventListener('click', closeMnGenConfirm);
+  $('#mn-gen-confirm-ok').addEventListener('click', confirmMnGen);
+  $('#mn-gen-confirm-modal').addEventListener('click', e => { if (e.target.id === 'mn-gen-confirm-modal') closeMnGenConfirm(); });
   // 상단 고정 항목 리스트 — 이름변경(input)·순서/삭제(click) 위임
   $('#mn-map-status').addEventListener('input', e => {
     const inp = e.target.closest('.mn-item-label'); if (inp) mnRenameItem(+inp.dataset.idx, inp.value);

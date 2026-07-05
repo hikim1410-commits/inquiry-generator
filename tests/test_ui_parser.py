@@ -42,6 +42,17 @@ def _run_js(body: str) -> str:
     return r.stdout.strip()
 
 
+def _run_js_with(fn_names, body: str) -> str:
+    """지정한 함수들만 추출해 prelude로 삼는 범용 버전 (_run_js는 섹션 파서 전용)."""
+    src = APP_JS.read_text(encoding="utf-8")
+    prelude = "\n".join(_extract_fn(src, name) for name in fn_names) + "\n"
+    r = subprocess.run(["node", "-e", prelude + body],
+                       capture_output=True, text=True, encoding="utf-8",
+                       timeout=30)
+    assert r.returncode == 0, f"node 실행 실패:\n{r.stderr}"
+    return r.stdout.strip()
+
+
 def test_roundtrip_text_stable():
     """정규형 텍스트: text → sections → text 완전 동일."""
     body = """
@@ -83,3 +94,33 @@ if (secs[3].text !== '한칸들여쓰기') { console.error(secs[3].text); proces
 console.log('OK');
 """
     assert _run_js(body) == "OK"
+
+
+def test_derive_custom_slots_table0_only_no_slot():
+    """mnDeriveCustomSlots: 표 0의 '슬롯 없음+라벨 있음' 핀만 도출, 표준 슬롯 핀·표>0 핀·라벨 없는 핀은 제외."""
+    body = """
+const anns = [
+  { table: 0, row: 1, col: 2, label: '작성자', comment: '' },
+  { table: 0, row: 3, col: 0, label: '', comment: '' },
+  { table: 0, row: 4, col: 1, slot: 'business_name', label: '사업명' },
+  { table: 1, row: 0, col: 0, label: '부서', comment: '' },
+];
+const out = mnDeriveCustomSlots(anns);
+const want = JSON.stringify([{ id: 'c1_2', label: '작성자', cell: [1, 2] }]);
+if (JSON.stringify(out) !== want) { console.error(JSON.stringify(out)); process.exit(1); }
+console.log('OK');
+"""
+    assert _run_js_with(["mnDeriveCustomSlots"], body) == "OK"
+
+
+def test_derive_custom_slots_id_stable_across_relabel():
+    """id는 좌표 기반("c행_열")이라 라벨을 바꿔도 동일 — 재편집 시 custom_fields 값이 유지된다."""
+    body = """
+const before = mnDeriveCustomSlots([{ table: 0, row: 2, col: 5, label: '담당' }]);
+const after  = mnDeriveCustomSlots([{ table: 0, row: 2, col: 5, label: '담당자' }]);
+if (before[0].id !== after[0].id || before[0].id !== 'c2_5') {
+  console.error(before[0].id, after[0].id); process.exit(1);
+}
+console.log('OK');
+"""
+    assert _run_js_with(["mnDeriveCustomSlots"], body) == "OK"

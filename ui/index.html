@@ -301,6 +301,11 @@
           </div>
         </div>
 
+        <div id="mn-r-custom-card" class="card form-card hidden">
+          <h3>추가 항목 <span class="h-sub">현재 양식에 매핑된 커스텀 항목</span></h3>
+          <div id="mn-r-custom-fields" class="form-grid"></div>
+        </div>
+
         <div class="card form-card">
           <h3>참석자 <span class="h-sub">기관별 한 줄, 첫 줄이 주관기관</span>
             <button id="mn-r-add-participant" class="btn btn-mini" type="button">＋ 줄 추가</button>
@@ -560,7 +565,7 @@
           <div class="inline-row" style="align-items:center;gap:8px;flex-wrap:wrap">
             <span id="mn-tpl-name" class="folder-path" style="flex:1;min-width:0">확인 중...</span>
             <button id="btn-pick-mn-tpl" class="btn btn-ghost">파일 선택</button>
-            <button id="btn-scan-mn-tpl" class="btn btn-outline" disabled>분석·적용</button>
+            <button id="btn-scan-mn-tpl" class="btn btn-outline" disabled>매핑 편집</button>
             <button id="btn-reset-mn-tpl" class="btn btn-ghost">기본 복원</button>
           </div>
           <span id="mn-tpl-status" class="h-sub" style="display:block;margin-top:6px"></span>
@@ -571,8 +576,8 @@
             </table>
             <div id="mn-tpl-unmapped" class="h-sub" style="margin-top:6px"></div>
           </div>
-          <p class="hint">※ 커스텀 HWPX 양식을 지정하면 [분석·적용]으로 AI가 표 구조를 분석해
-            각 항목이 들어갈 셀을 매핑합니다. 기본 내장 양식은 분석 없이 바로 사용합니다.</p>
+          <p class="hint">※ 커스텀 HWPX 양식을 지정하면 [매핑 편집]을 눌러 양식 그림 위에 핀을 찍어
+            각 항목이 들어갈 셀을 지정합니다(AI 자동 매핑도 그 안에서 사용 가능). 기본 내장 양식은 매핑 없이 바로 사용합니다.</p>
         </div>
        </div>
 
@@ -719,7 +724,7 @@
       </div>
       <div class="mn-map-side">
         <h4 class="mn-map-side-h">상단 고정 항목 <span class="h-sub">이름·순서 자유 편집</span>
-          <button id="mn-map-ai" class="btn btn-mini btn-violet" type="button" title="AI가 표를 다시 분석해 표준 항목 핀을 채웁니다">✦ AI 자동 매핑</button>
+          <button id="mn-map-ai" class="btn btn-mini btn-violet" type="button" title="표준 7항목(사업명·일시 등)의 셀을 AI로 찾아 핀을 배치">✦ AI 표준 항목 매핑</button>
         </h4>
         <p class="mn-map-side-hint">양식 그림을 클릭해 항목을 추가하세요. 표준 항목 이름은 표시용입니다(값은 자동 연결).</p>
         <div class="mn-map-status" id="mn-map-status"></div>
@@ -728,7 +733,7 @@
     <div id="mn-map-warn" class="ai-status"></div>
     <div class="modal-actions">
       <button id="mn-map-autolabel" class="btn btn-ghost mn-map-autolabel" type="button"
-        title="이미 추출된 셀 라벨을 AI가 분석해 입력 칸에 항목 핀을 자동 생성합니다">✨ 항목 자동 인식</button>
+        title="양식의 라벨 칸을 AI로 읽어 커스텀 항목 핀을 자동 생성">✨ AI 라벨 스캔</button>
       <button id="mn-map-cancel" class="btn btn-ghost" type="button">닫기</button>
       <button id="mn-map-save" class="btn btn-primary" type="button">매핑 저장</button>
     </div>
@@ -745,6 +750,18 @@
     <div class="modal-actions">
       <button id="mn-preset-del-cancel" class="btn btn-ghost" type="button">취소</button>
       <button id="mn-preset-del-confirm" class="btn btn-danger" type="button">삭제</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 회의록 생성 확인 모달 (미매핑 항목 경고) ===== -->
+<div id="mn-gen-confirm-modal" class="modal-back hidden">
+  <div class="modal card">
+    <h3>미매핑 항목 확인</h3>
+    <p class="hint" id="mn-gen-confirm-body"></p>
+    <div class="modal-actions">
+      <button id="mn-gen-confirm-cancel" class="btn btn-ghost" type="button">취소</button>
+      <button id="mn-gen-confirm-ok" class="btn btn-primary" type="button">그대로 생성</button>
     </div>
   </div>
 </div>

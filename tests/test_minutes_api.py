@@ -436,6 +436,39 @@ def test_generate_applies_active_preset_cellmap(workdir):
     assert any("테스트 사업" in t for t in texts), f"매핑 셀에 값 없음: {texts}"
 
 
+# ── Drive 자동 업로드 패리티 (견적서 generate()와 동일 패턴) ───────────────────
+
+def test_generate_minutes_drive_auto_upload(monkeypatch, workdir):
+    """drive.auto 옵션 ON + 연결됨 → HWPX 1개로 업로드 호출, 결과가 drive에 담김."""
+    from src.drive import gdrive
+    calls = []
+    monkeypatch.setattr(gdrive, "status", lambda: {"connected": True})
+    monkeypatch.setattr(gdrive, "upload_files",
+                         lambda paths, folder: calls.append(paths) or {"ok": True})
+
+    api = _api(workdir)
+    api.cfg["drive"] = {"auto": True, "folder": ""}
+    r = api.generate_minutes({"data": SAMPLE})
+    assert r["ok"], r.get("error")
+    assert calls == [[r["path"]]]        # 회의록은 PDF 없이 HWPX 1개만
+    assert r["drive"] == {"ok": True}
+
+
+def test_generate_minutes_drive_auto_off_skips_upload(monkeypatch, workdir):
+    """drive.auto 옵션 OFF → 업로드 함수가 아예 호출되지 않는다."""
+    from src.drive import gdrive
+    calls = []
+    monkeypatch.setattr(gdrive, "status", lambda: {"connected": True})
+    monkeypatch.setattr(gdrive, "upload_files", lambda paths, folder: calls.append(paths))
+
+    api = _api(workdir)
+    api.cfg["drive"] = {"auto": False, "folder": ""}
+    r = api.generate_minutes({"data": SAMPLE})
+    assert r["ok"], r.get("error")
+    assert calls == []
+    assert r["drive"] is None
+
+
 def test_generate_uses_cache_no_ai_call(monkeypatch, workdir):
     """C-3: 생성 경로는 캐시(load_minutes_fieldmap)만 사용 — 추가 AI 호출 없음.
     AI 함수를 호출 카운터로 monkeypatch해 호출 0을 검증한다."""

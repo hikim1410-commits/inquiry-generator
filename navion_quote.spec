@@ -8,6 +8,15 @@
 - config.json/token.json/app-log.txt 는 EXE 옆(쓰기 가능 위치)에 생성됨.
 - pywebview(EdgeChromium)는 자체 PyInstaller 훅이 WebView2 DLL을 자동 수집.
 """
+import sys as _sys_ver_check
+if _sys_ver_check.version_info[:2] != (3, 12):
+    raise SystemExit(
+        "[spec] 빌드 인터프리터 버전 불일치: 현재 Python "
+        f"{_sys_ver_check.version_info[0]}.{_sys_ver_check.version_info[1]}. "
+        "'py -3.12 -m PyInstaller navion_quote.spec --noconfirm' 로 3.12에서 빌드하세요. "
+        "(과거 3.13으로 빌드한 배포본이 사용자 PC와 드리프트해 장애 발생 — tasks/lessons.md 2026-06-11 참고)"
+    )
+
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 # ── EXE 버전 리소스 생성 (파일 속성 → 자세히 탭에 표기) ──────────────────────
