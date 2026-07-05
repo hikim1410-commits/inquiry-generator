@@ -1,20 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 빌드 명세 — 내비온 견적서 생성기.
 
-빌드:  py -3.12 -m PyInstaller navion_quote.spec --noconfirm
+빌드:  .venv-build\Scripts\python.exe -m PyInstaller navion_quote.spec --noconfirm
 산출:  dist/내비온 견적서 생성기/내비온 견적서 생성기.exe  (onedir)
 
 - ui/, templates/ 는 데이터로 번들(읽기 전용). 코드에서 src.paths.resource_path로 접근.
 - config.json/token.json/app-log.txt 는 EXE 옆(쓰기 가능 위치)에 생성됨.
 - pywebview(EdgeChromium)는 자체 PyInstaller 훅이 WebView2 DLL을 자동 수집.
 """
+# 빌드 인터프리터 고정 — 표준은 이 머신의 .venv-build(Python 3.13). v1.3.x~v1.4.x
+# 정식 릴리스가 모두 3.13 빌드로 출하됨. 다른 버전으로 빌드하면 배포본이 표준에서
+# 드리프트하므로 하드 차단 (tasks/lessons.md 2026-06-11 드리프트 장애 참고).
 import sys as _sys_ver_check
-if _sys_ver_check.version_info[:2] != (3, 12):
+if _sys_ver_check.version_info[:2] != (3, 13):
     raise SystemExit(
         "[spec] 빌드 인터프리터 버전 불일치: 현재 Python "
         f"{_sys_ver_check.version_info[0]}.{_sys_ver_check.version_info[1]}. "
-        "'py -3.12 -m PyInstaller navion_quote.spec --noconfirm' 로 3.12에서 빌드하세요. "
-        "(과거 3.13으로 빌드한 배포본이 사용자 PC와 드리프트해 장애 발생 — tasks/lessons.md 2026-06-11 참고)"
+        "표준 빌드 환경은 .venv-build(Python 3.13)입니다 — "
+        "'.venv-build\\Scripts\\python.exe -m PyInstaller navion_quote.spec --noconfirm' 로 빌드하세요."
     )
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files

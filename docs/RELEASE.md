@@ -26,7 +26,8 @@ __version__ = "1.2.1"   # 이전: "1.2.0"
 ### 2. 빌드
 
 ```bat
-py -3.12 -m PyInstaller navion_quote.spec --noconfirm
+rem 표준 빌드 환경 = .venv-build (Python 3.13) — spec의 버전 가드가 다른 버전을 차단
+.venv-build\Scripts\python.exe -m PyInstaller navion_quote.spec --noconfirm
 ```
 빌드 후 `dist\내비온 견적서 생성기\내비온 견적서 생성기.exe` 확인.
 파일 우클릭 → 속성 → 자세히 탭에 버전 표기(예: `1.2.1.0`) 확인.
