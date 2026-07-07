@@ -80,141 +80,6 @@ def _neighbor_above(cells_in_table: list, cell: dict) -> dict:
     return cands[0] if len(cands) == 1 else None
 
 
-_PROMPT_TMPL = """당신은 한글(HWPX) 회의록 표 양식 분석가입니다.
-
-아래는 회의록 양식 표의 모든 셀입니다. 각 셀은 (행,열): 텍스트 형식이며,
-텍스트는 라벨(예: "사업명", "일 시")이거나 기존 샘플값, 값이 없으면 (빈 셀)입니다.
-값이 들어갈 셀은 보통 라벨 셀의 **바로 오른쪽(같은 행, 열+1)** 또는 **바로 아래(행+1)**의
-빈 셀(또는 샘플값 셀)입니다.
-
-## 표 셀 목록
-{grid}
-
-## 채워야 할 표준 슬롯
-{slots}
-
-## 작업
-각 표준 슬롯에 대해, 그 값이 실제로 입력될 셀의 좌표 [행, 열]을 cell_map으로 반환하세요.
-- 라벨 셀(예: "사업명"이라고 적힌 셀)이 아니라, 그 **오른쪽/아래의 값 셀** 좌표를 지정합니다.
-- 우선순위: 라벨 셀의 ① 오른쪽 셀 → ② 아래 셀. 이미 다른 라벨 텍스트가 있는 셀은 고르지 마세요.
-- 좌표는 위 목록의 (행,열) 숫자를 그대로 사용합니다.
-- 적절한 셀을 찾을 수 없는 슬롯은 cell_map에 넣지 말고 unmapped에 슬롯명을 넣으세요.
-- 슬롯명을 임의로 만들지 않습니다(목록의 7개만 사용).
-
-JSON으로만 답하세요:
-{{"cell_map": {{"business_name": [행,열], ...}}, "unmapped": ["slot", ...]}}
-"""
-
-
-def map_minutes_cells(grid_cells: list, provider: str = "gemini",
-                      api_key: str = "", model: str = "gemini-flash-latest",
-                      timeout: int = 30) -> dict:
-    """표 그리드 → 슬롯별 셀좌표 매핑 (선택된 AI 프로바이더 호출).
-
-    반환: {"ok": bool, "cell_map": {slot: [r,c]}, "unmapped": [slot], "error"?: str}
-    """
-    if not api_key:
-        return {"ok": False, "error": "AI API 키가 없어 자동 분석을 건너뜁니다.",
-                "cell_map": {}, "unmapped": list(MINUTES_SLOTS.keys())}
-
-    grid_lines = "\n".join(
-        f"  ({c['row']},{c['col']}): {c['text'] or '(빈 셀)'}" for c in grid_cells)
-    slot_lines = "\n".join(f"  {k}: {v}" for k, v in MINUTES_SLOTS.items())
-    prompt = _PROMPT_TMPL.format(grid=grid_lines, slots=slot_lines)
-
-    # cell_map은 동적 키 객체라 strict 스키마 불가 → JSON 모드(schema=None)
-    r = llm.complete_json(provider, api_key, model, prompt, schema=None, timeout=timeout)
-    if not r.get("ok"):
-        return {"ok": False, "error": r.get("error", "AI 호출 실패"),
-                "cell_map": {}, "unmapped": list(MINUTES_SLOTS.keys())}
-
-    data = r["data"] or {}
-    raw_map = data.get("cell_map", {}) or {}
-    cell_map, unmapped = {}, list(data.get("unmapped", []) or [])
-    # 검증: 알려진 슬롯 + [정수,정수] 형태만 수용
-    for slot, rc in raw_map.items():
-        if slot not in MINUTES_SLOTS:
-            continue
-        try:
-            cell_map[slot] = [int(rc[0]), int(rc[1])]
-        except (TypeError, ValueError, IndexError):
-            if slot not in unmapped:
-                unmapped.append(slot)
-    # 매핑 안 된 슬롯 보충
-    for slot in MINUTES_SLOTS:
-        if slot not in cell_map and slot not in unmapped:
-            unmapped.append(slot)
-    return {"ok": True, "cell_map": cell_map, "unmapped": unmapped}
-
-
-_AUTO_PROMPT_TMPL = """당신은 한글(HWPX) 양식(회의록·상담일지 등) 표 분석가입니다.
-아래는 양식의 모든 표 셀입니다. 각 셀은 `(표,행,열): 텍스트` 형식이며, 값이 없으면 `(빈 셀)`입니다.
-
-## 개념
-- '라벨 칸' = 항목 이름이 적힌 셀(예: "회사명", "제품명", "상담내용", "일 시", "참석자").
-- '입력 칸' = 그 값이 들어갈 **빈 셀**. 보통 라벨 칸의 **바로 오른쪽(같은 행, 열+1)** 또는
-  **바로 아래(행+1, 같은 열)**에 있습니다.
-
-## 규칙 (정확도 핵심)
-- 각 라벨 칸마다 **같은 표 안**에서 인접한 **빈 셀**을 입력 칸으로 고릅니다(표 번호를 바꾸지 마세요).
-- 우선순위: ① 오른쪽 빈 셀 → ② 아래 빈 셀.
-- **이미 텍스트가 있는 셀은 입력 칸으로 고르지 마세요**(그건 다른 라벨/제목/머리글입니다).
-- 한 입력 칸에는 항목 하나만(좌표 중복 금지). 라벨 칸 자신을 입력 칸으로 반환하지 마세요.
-- 인접한 빈 셀이 없거나 라벨이 불분명하면 그 항목은 **건너뜁니다**(억지로 만들지 않음).
-- 좌표 숫자는 위 목록의 값을 그대로 사용합니다.
-
-## 표 셀 목록
-{grid}
-
-## 작업
-각 라벨 칸의 입력 칸 (표,행,열)과 항목명(라벨 텍스트 그대로)을 pins로 반환하세요.
-JSON으로만 답하세요:
-{{"pins": [{{"table": 0, "row": 0, "col": 1, "label": "회사명"}}, ...]}}
-"""
-
-
-def auto_label_cells(grid_cells: list, provider: str = "gemini",
-                     api_key: str = "", model: str = "gemini-flash-latest",
-                     timeout: int = 30) -> dict:
-    """라벨 칸을 AI로 식별해 대응 입력 칸에 항목명 핀을 생성 (비표준 양식용).
-
-    map_minutes_cells(표준 7슬롯)와 달리 임의 항목명을 자동 라벨링한다.
-    반환: {"ok": bool, "pins": [{table,row,col,label}], "error"?: str}
-      - 실제 grid에 존재하는 (table,row,col)만 수용, 중복 좌표·빈 라벨 제거(1셀=1핀).
-      - 키 없으면 {ok:False, error:"AI 키 없음", pins:[]}.
-    """
-    if not api_key:
-        return {"ok": False, "error": "AI 키 없음", "pins": []}
-
-    grid_lines = "\n".join(
-        f"  ({c.get('table', 0)},{c['row']},{c['col']}): {c.get('text') or '(빈 셀)'}"
-        for c in grid_cells)
-    prompt = _AUTO_PROMPT_TMPL.format(grid=grid_lines)
-
-    r = llm.complete_json(provider, api_key, model, prompt, schema=None, timeout=timeout)
-    if not r.get("ok"):
-        return {"ok": False, "error": r.get("error", "AI 호출 실패"), "pins": []}
-
-    data = r.get("data") or {}
-    valid = {(c.get("table", 0), c["row"], c["col"]) for c in grid_cells}
-    pins, seen = [], set()
-    for p in (data.get("pins") or []):
-        if not isinstance(p, dict):
-            continue
-        try:
-            t, row, col = int(p["table"]), int(p["row"]), int(p["col"])
-        except (TypeError, ValueError, KeyError):
-            continue
-        label = p.get("label")
-        if not isinstance(label, str) or not label.strip():
-            continue
-        if (t, row, col) not in valid or (t, row, col) in seen:
-            continue
-        seen.add((t, row, col))
-        pins.append({"table": t, "row": row, "col": col, "label": label.strip()})
-    return {"ok": True, "pins": pins}
-
-
 _FORM_PROMPT_TMPL = """당신은 한글(HWPX) 양식(회의록·상담일지 등) 표 구조 분석가입니다.
 
 아래는 양식의 모든 최상위 표의 셀입니다. 각 셀은
@@ -268,7 +133,7 @@ def map_minutes_form(grid_cells: list, provider: str = "gemini",
                      timeout: int = 45) -> dict:
     """표준 7슬롯 매핑 + 커스텀 라벨 핀을 AI 1회 호출로 동시 산출.
 
-    map_minutes_cells(표준)와 auto_label_cells(커스텀)의 통합 대체.
+    레거시 개별 매핑 함수 2종(표준 슬롯 매핑·커스텀 라벨링)의 통합 대체.
     후검증(코드가 최종 방어선): 좌표 실존성, 표준↔커스텀 교차 중복(표준 우선),
     커스텀 핀은 빈 셀만/표준은 견본 텍스트 허용(비대칭), 병합 폭 기반 인접성은
     경고만(오탐 시 사용자가 지울 수 있게 제거하지 않음).
@@ -390,7 +255,7 @@ def load_minutes_fieldmap(template_path: str) -> dict:
 def save_minutes_fieldmap(template_path: str, map_result: dict) -> str:
     """AI 매핑 결과를 .minutes.fieldmap.json 으로 저장 (v3, 좌표 [table,row,col]).
 
-    map_result["cell_map"]은 legacy map_minutes_cells([행,열] 2요소)와
+    map_result["cell_map"]은 구버전 저장 포맷([행,열] 2요소)과
     map_minutes_form([표,행,열] 3요소, 다중 표) 양쪽에서 올 수 있어
     _norm_cell_map으로 항상 3요소로 정규화한 뒤 저장한다.
     """

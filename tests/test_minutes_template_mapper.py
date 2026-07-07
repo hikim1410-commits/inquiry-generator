@@ -10,55 +10,14 @@ import pytest
 
 from src.ai.minutes_template_mapper import (
     save_minutes_cellmap, save_minutes_fieldmap, load_minutes_fieldmap,
-    auto_label_cells,
 )
 import src.ai.minutes_template_mapper as mtm
 from src.minutes.hwpx_minutes import DEFAULT_CELLS
 
 
-# ── auto_label_cells: AI 모킹(llm.complete_json) ──────────────────────────────
-
-_AUTO_GRID = [
-    {"table": 0, "row": 0, "col": 0, "text": "회사명"},
-    {"table": 0, "row": 0, "col": 1, "text": ""},
-    {"table": 0, "row": 1, "col": 0, "text": "제품명"},
-    {"table": 0, "row": 1, "col": 1, "text": ""},
-]
-
-
 def _mock_llm(monkeypatch, payload):
     monkeypatch.setattr(mtm.llm, "complete_json",
                         lambda *a, **k: {"ok": True, "data": payload})
-
-
-def test_auto_label_drops_nonexistent_and_dupes(monkeypatch):
-    _mock_llm(monkeypatch, {"pins": [
-        {"table": 0, "row": 0, "col": 1, "label": "회사명"},
-        {"table": 0, "row": 1, "col": 1, "label": "제품명"},
-        {"table": 0, "row": 9, "col": 9, "label": "없는칸"},     # (a) 존재X
-        {"table": 0, "row": 0, "col": 1, "label": "중복좌표"},   # (b) 중복
-        {"table": 0, "row": 1, "col": 1, "label": "  "},          # 빈 라벨
-    ]})
-    r = auto_label_cells(_AUTO_GRID, "gemini", "fakekey", "m")
-    assert r["ok"]
-    coords = [(p["table"], p["row"], p["col"]) for p in r["pins"]]
-    assert coords == [(0, 0, 1), (0, 1, 1)]      # 존재·고유·라벨 있는 핀만
-    assert r["pins"][0]["label"] == "회사명"      # 첫 중복(둘째 '중복좌표' 거부)
-
-
-def test_auto_label_no_key():
-    r = auto_label_cells(_AUTO_GRID, "gemini", "", "m")   # (c) 키 없음
-    assert r["ok"] is False
-    assert r["pins"] == []
-    assert r.get("error")
-
-
-def test_auto_label_ai_failure(monkeypatch):
-    monkeypatch.setattr(mtm.llm, "complete_json",
-                        lambda *a, **k: {"ok": False, "error": "boom"})
-    r = auto_label_cells(_AUTO_GRID, "gemini", "fakekey", "m")
-    assert r["ok"] is False
-    assert r["pins"] == []
 
 
 @pytest.fixture()
@@ -301,10 +260,31 @@ def test_map_form_unknown_slot_and_dup_coord(monkeypatch):
     assert r["cell_map"] == {}
     assert [p["label"] for p in r["pins"]] == ["작성자"]
 
+def test_map_form_pin_blank_label_dropped(monkeypatch):
+    """빈 라벨(공백만)인 핀은 좌표가 유효해도 버려진다 (T11: 구 커스텀 라벨링 함수의
+    빈 라벨 필터링 검증을 map_minutes_form 대상으로 이관)."""
+    from src.ai.minutes_template_mapper import map_minutes_form
+    _mock_llm(monkeypatch, {
+        "slots": [],
+        "pins": [{"table": 0, "row": 2, "col": 1, "label": "   "}]})
+    r = map_minutes_form(_grid_std(), "gemini", "KEY", "m")
+    assert r["pins"] == []
+
 def test_map_form_no_key():
     from src.ai.minutes_template_mapper import map_minutes_form
     r = map_minutes_form(_grid_std(), "gemini", "", "m")
     assert not r["ok"] and r["cell_map"] == {} and r["pins"] == []
+
+def test_map_form_ai_call_failure(monkeypatch):
+    """키는 있으나 AI 호출 자체가 실패(네트워크·파싱 오류 등)하면 ok:False + 빈 결과
+    (T11: 구 커스텀 라벨링 함수의 AI 호출 실패 검증을 map_minutes_form 대상으로 이관 —
+    no-key와는 별개인 '호출 후 실패' 경로)."""
+    from src.ai.minutes_template_mapper import map_minutes_form
+    monkeypatch.setattr(mtm.llm, "complete_json",
+                        lambda *a, **k: {"ok": False, "error": "boom"})
+    r = map_minutes_form(_grid_std(), "gemini", "KEY", "m")
+    assert r["ok"] is False
+    assert r["cell_map"] == {} and r["pins"] == []
 
 def test_map_form_adjacency_warning_not_removal(monkeypatch):
     """인접 라벨 없는 핀은 제거 대신 경고 유지(사용자가 지울 수 있게)."""

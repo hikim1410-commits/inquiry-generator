@@ -1204,50 +1204,10 @@ class Api:
         except Exception as e:
             return _err(e)
 
-    def scan_minutes_template(self, hwpx_path: str) -> dict:
-        """회의록 HWPX 양식의 표 구조를 스캔 → AI로 슬롯별 셀좌표 매핑 → 캐시.
-
-        반환: {ok, is_standard, cell_map, unmapped, slot_labels, ai_used, ai_error?, fieldmap_path}
-        """
-        try:
-            from src.scan.hwpx_scan import scan_hwpx_grid
-            from src.ai.minutes_template_mapper import (
-                map_minutes_cells, save_minutes_fieldmap, load_minutes_fieldmap,
-                is_standard_map, MINUTES_SLOTS)
-            if not os.path.isfile(hwpx_path):
-                return _err(f"파일을 찾을 수 없습니다: {hwpx_path}")
-
-            grid = scan_hwpx_grid(hwpx_path)
-            if not grid.get("ok"):
-                return grid
-
-            provider = cs.get_provider(self.cfg)
-            api_key = cs.get_ai_key(self.cfg, provider)
-            map_r = map_minutes_cells(grid["cells"], provider, api_key,
-                                      cs.get_ai_model(self.cfg, provider))
-            result = {
-                "ok": True,
-                "ai_used": True,
-                "cell_map": map_r.get("cell_map", {}),
-                "unmapped": map_r.get("unmapped", []),
-                "slot_labels": MINUTES_SLOTS,
-                "is_standard": is_standard_map(map_r.get("cell_map", {})),
-                "grid": grid,  # 병합셀(colspan/rowspan) 포함 — UI 격자 재구성용
-            }
-            if not map_r.get("ok"):
-                result["ai_error"] = map_r.get("error", "")
-
-            # AI 실패 시 기존 정상 캐시 보호 (scan_template와 동일 규칙)
-            if map_r.get("ok") or not load_minutes_fieldmap(hwpx_path):
-                result["fieldmap_path"] = save_minutes_fieldmap(hwpx_path, map_r)
-            return result
-        except Exception as e:
-            return _err(e, traceback=traceback.format_exc())
-
     def scan_minutes_grid(self, template_path: str) -> dict:
         """양식 표 격자만 추출(AI 호출 없음) — 오프라인 전용 시각 격자 경로.
 
-        AI 매핑(scan_minutes_template)과 분리해, AI 키 부재·지연·실패와 무관하게
+        AI 매핑(map_minutes_form)과 분리해, AI 키 부재·지연·실패와 무관하게
         병합셀(colspan/rowspan) 포함 격자를 항상 반환(적대리뷰 #6).
         반환: {ok, row_cnt, col_cnt, cells:[{row,col,text,colspan,rowspan}], error?}
         """
@@ -1262,7 +1222,7 @@ class Api:
     def map_minutes_form(self, template_path: str) -> dict:
         """양식 AI 통합 분석 — 표준 7슬롯 + 커스텀 라벨 핀을 1회 호출로.
 
-        scan_minutes_template(표준)·auto_label_minutes_form(커스텀)의 통합 대체.
+        레거시 개별 엔드포인트 2종(표준 매핑·커스텀 라벨링)의 통합 대체.
         fieldmap 캐시 저장·AI 실패 시 기존 정상 캐시 보호 규칙은 종전과 동일.
         반환: {ok, ai_used, cell_map, unmapped, pins(+nx,ny), warnings,
                slot_labels, is_standard, grid, fieldmap_path?, ai_error?}
@@ -1310,41 +1270,6 @@ class Api:
             if map_r.get("ok") or not load_minutes_fieldmap(template_path):
                 result["fieldmap_path"] = save_minutes_fieldmap(template_path, map_r)
             return result
-        except Exception as e:
-            return _err(e, traceback=traceback.format_exc())
-
-    def auto_label_minutes_form(self, template_path: str) -> dict:
-        """양식의 라벨 칸을 AI로 식별 → 입력 칸에 항목명 핀 자동 생성.
-
-        scan_hwpx_grid로 grid를 얻어 auto_label_cells(현재 provider/key/model) 호출,
-        각 pin에 해당 셀 중심 nx,ny를 채워 프론트가 바로 핀 배치 가능하게 한다.
-        반환: {ok, pins:[{table,row,col,label,nx,ny}], error?}. 키 없으면 ok:False+안내.
-        """
-        try:
-            from src.scan.hwpx_scan import scan_hwpx_grid
-            from src.ai.minutes_template_mapper import auto_label_cells
-            if not os.path.isfile(template_path):
-                return _err(f"파일을 찾을 수 없습니다: {template_path}")
-            grid = scan_hwpx_grid(template_path)
-            if not grid.get("ok"):
-                return grid
-            provider = cs.get_provider(self.cfg)
-            api_key = cs.get_ai_key(self.cfg, provider)
-            res = auto_label_cells(grid["cells"], provider, api_key,
-                                   cs.get_ai_model(self.cfg, provider))
-            if not res.get("ok"):
-                return _err(res.get("error", "자동 인식 실패"), pins=[])
-            by_cell = {(c.get("table", 0), c["row"], c["col"]): c
-                       for c in grid["cells"]}
-            pins = []
-            for p in res["pins"]:
-                c = by_cell.get((p["table"], p["row"], p["col"]))
-                pin = dict(p)
-                if c:                     # 셀 중심 — 프론트 핀 배치용
-                    pin["nx"] = c["nx"] + c["nw"] / 2
-                    pin["ny"] = c["ny"] + c["nh"] / 2
-                pins.append(pin)
-            return {"ok": True, "pins": pins}
         except Exception as e:
             return _err(e, traceback=traceback.format_exc())
 
