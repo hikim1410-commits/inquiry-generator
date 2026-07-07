@@ -96,17 +96,22 @@ console.log('OK');
     assert _run_js(body) == "OK"
 
 
-def test_derive_custom_slots_table0_only_no_slot():
-    """mnDeriveCustomSlots: 표 0의 '슬롯 없음+라벨 있음' 핀만 도출, 표준 슬롯 핀·표>0 핀·라벨 없는 핀은 제외."""
+def test_derive_custom_slots_multi_table_ids():
+    """mnDeriveCustomSlots: 전 표 대상으로 '슬롯 없음+라벨 있음' 핀을 도출.
+    id 규칙 — 표0은 레거시 형식("c행_열") 유지, 표1+는 표 포함 형식("c표_행_열").
+    빈 라벨 핀·슬롯 핀은 표에 관계없이 제외된다."""
     body = """
 const anns = [
-  { table: 0, row: 1, col: 2, label: '작성자', comment: '' },
-  { table: 0, row: 3, col: 0, label: '', comment: '' },
-  { table: 0, row: 4, col: 1, slot: 'business_name', label: '사업명' },
-  { table: 1, row: 0, col: 0, label: '부서', comment: '' },
+  { table: 0, row: 3, col: 0, label: '부서' },
+  { table: 1, row: 3, col: 0, label: '작성자' },
+  { table: 1, row: 2, col: 1, label: '' },
+  { table: 0, row: 4, col: 1, slot: 'content' },
 ];
 const out = mnDeriveCustomSlots(anns);
-const want = JSON.stringify([{ id: 'c1_2', label: '작성자', cell: [1, 2] }]);
+const want = JSON.stringify([
+  { id: 'c3_0',   label: '부서',   cell: [0, 3, 0] },
+  { id: 'c1_3_0', label: '작성자', cell: [1, 3, 0] },
+]);
 if (JSON.stringify(out) !== want) { console.error(JSON.stringify(out)); process.exit(1); }
 console.log('OK');
 """
@@ -114,12 +119,18 @@ console.log('OK');
 
 
 def test_derive_custom_slots_id_stable_across_relabel():
-    """id는 좌표 기반("c행_열")이라 라벨을 바꿔도 동일 — 재편집 시 custom_fields 값이 유지된다."""
+    """id는 좌표 기반이라 라벨을 바꿔도 동일 — 표0("c행_열")·표1+("c표_행_열") 모두 유지되어
+    재편집 시 custom_fields 값이 이어진다."""
     body = """
-const before = mnDeriveCustomSlots([{ table: 0, row: 2, col: 5, label: '담당' }]);
-const after  = mnDeriveCustomSlots([{ table: 0, row: 2, col: 5, label: '담당자' }]);
-if (before[0].id !== after[0].id || before[0].id !== 'c2_5') {
-  console.error(before[0].id, after[0].id); process.exit(1);
+const before0 = mnDeriveCustomSlots([{ table: 0, row: 2, col: 5, label: '담당' }]);
+const after0  = mnDeriveCustomSlots([{ table: 0, row: 2, col: 5, label: '담당자' }]);
+if (before0[0].id !== after0[0].id || before0[0].id !== 'c2_5') {
+  console.error(before0[0].id, after0[0].id); process.exit(1);
+}
+const before1 = mnDeriveCustomSlots([{ table: 1, row: 2, col: 5, label: '담당' }]);
+const after1  = mnDeriveCustomSlots([{ table: 1, row: 2, col: 5, label: '담당자' }]);
+if (before1[0].id !== after1[0].id || before1[0].id !== 'c1_2_5') {
+  console.error(before1[0].id, after1[0].id); process.exit(1);
 }
 console.log('OK');
 """

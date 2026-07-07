@@ -6,12 +6,12 @@
 AI에 주고, 각 표준 슬롯의 값이 들어갈 셀(row,col)을 받는다.
 결과는 템플릿 옆 .minutes.fieldmap.json 으로 캐시되며 build_minutes(cell_map=)로 전달된다.
 
-minutes.fieldmap.json 구조:
+minutes.fieldmap.json 구조 (v3):
   {
-    "version": 1,
+    "version": 3,
     "template": "파일명.hwpx",
     "is_standard": false,         # DEFAULT_CELLS 와 동일하면 true
-    "cell_map": {"business_name": [1,1], "meeting_date": [2,1], ...},
+    "cell_map": {"business_name": [0,1,1], "meeting_date": [0,2,1], ...},  # [table,row,col]
     "unmapped": ["content"]       # 셀을 못 찾은 슬롯
   }
 """
@@ -32,148 +32,205 @@ MINUTES_SLOTS = {
     "content":       "회의 내용 본문 (섹션·본문이 들어갈 셀)",
 }
 
-_PROMPT_TMPL = """당신은 한글(HWPX) 회의록 표 양식 분석가입니다.
 
-아래는 회의록 양식 표의 모든 셀입니다. 각 셀은 (행,열): 텍스트 형식이며,
-텍스트는 라벨(예: "사업명", "일 시")이거나 기존 샘플값, 값이 없으면 (빈 셀)입니다.
-값이 들어갈 셀은 보통 라벨 셀의 **바로 오른쪽(같은 행, 열+1)** 또는 **바로 아래(행+1)**의
-빈 셀(또는 샘플값 셀)입니다.
+def _serialize_grid(grid_cells: list) -> str:
+    """표별 헤더 + `(r,c)[+csN][+rsN]: 텍스트` 직렬화 (AI 프롬프트용).
+
+    span 1은 태그 생략(토큰 절약). 병합으로 덮인 좌표는 목록에 아예 없음을
+    프롬프트가 함께 설명한다. 텍스트 120자 절단·⏎ 병합은 scan 단계에서 이미 처리됨.
+    """
+    by_table = {}
+    for c in grid_cells:
+        by_table.setdefault(int(c.get("table", 0)), []).append(c)
+    lines = []
+    for t in sorted(by_table):
+        cells = sorted(by_table[t], key=lambda c: (c["row"], c["col"]))
+        rows = max((c["row"] + c.get("rowspan", 1) for c in cells), default=0)
+        cols = max((c["col"] + c.get("colspan", 1) for c in cells), default=0)
+        lines.append(f"[표{t}] {rows}행×{cols}열")
+        for c in cells:
+            tag = ""
+            if c.get("colspan", 1) > 1:
+                tag += f"+cs{c['colspan']}"
+            if c.get("rowspan", 1) > 1:
+                tag += f"+rs{c['rowspan']}"
+            lines.append(f"  ({c['row']},{c['col']}){tag}: {c.get('text') or '(빈 셀)'}")
+    return "\n".join(lines)
+
+
+def _neighbor_left(cells_in_table: list, cell: dict) -> dict:
+    """cell 왼쪽에 맞닿은 셀(병합 폭 기준, col+colspan == cell.col).
+
+    rowspan 겹침 범위 안에서 탐색. 후보가 정확히 1개일 때만 반환(모호하면 None).
+    같은 table 부분집합을 넘겨야 한다(표 간 좌표 중복 흔함).
+    """
+    r0, r1 = cell["row"], cell["row"] + cell.get("rowspan", 1)
+    cands = [c for c in cells_in_table
+             if c["col"] + c.get("colspan", 1) == cell["col"]
+             and c["row"] < r1 and r0 < c["row"] + c.get("rowspan", 1)]
+    return cands[0] if len(cands) == 1 else None
+
+
+def _neighbor_above(cells_in_table: list, cell: dict) -> dict:
+    """cell 위에 맞닿은 셀(row+rowspan == cell.row). 규칙은 _neighbor_left와 대칭."""
+    c0, c1 = cell["col"], cell["col"] + cell.get("colspan", 1)
+    cands = [c for c in cells_in_table
+             if c["row"] + c.get("rowspan", 1) == cell["row"]
+             and c["col"] < c1 and c0 < c["col"] + c.get("colspan", 1)]
+    return cands[0] if len(cands) == 1 else None
+
+
+_FORM_PROMPT_TMPL = """당신은 한글(HWPX) 양식(회의록·상담일지 등) 표 구조 분석가입니다.
+
+아래는 양식의 모든 최상위 표의 셀입니다. 각 셀은
+`(행,열)[+cs가로병합][+rs세로병합]: 텍스트` 형식이며, 텍스트가 없으면 (빈 셀)입니다.
++cs2는 오른쪽으로 2칸이 하나로 합쳐진 셀, +rs2는 아래로 2칸이 합쳐진 셀입니다(표시가
+없으면 병합 없음). **병합으로 덮인 좌표는 목록에 아예 나타나지 않습니다** — 예를 들어
+(1,1)이 +cs2라면 (1,2)라는 좌표는 존재하지 않으니 절대 고르지 마세요.
+
+## 개념 정의
+- '라벨 칸' = 항목 이름이 적힌 셀(예: "사업명", "일 시", "참석자", "성명", "연락처").
+- '표준 슬롯' = 아래 목록의 7개 공통 항목. 대부분의 회의록류 양식에 존재합니다.
+- '커스텀 항목' = 표준 슬롯이 아닌, 이 양식에만 있는 라벨(예: "작성자", "부서").
+- '입력 칸' = 라벨의 값이 실제로 들어갈 셀. 표준 슬롯의 입력 칸은 "(총 N명)"처럼 형식
+  힌트가 적힌 견본 텍스트 셀도 허용됩니다. 커스텀 항목의 입력 칸은 **반드시 빈 셀**이어야
+  합니다(이미 다른 텍스트가 있으면 그 항목은 건너뜁니다).
+  입력 칸은 항상 **라벨과 같은 표 안**의 인접 셀입니다. 우선순위: ① 라벨의 바로 오른쪽
+  → ② 라벨의 바로 아래. "오른쪽"은 열+1이 아니라 라벨이 가로 병합돼 있으면 그 폭만큼
+  건너뛴 다음 칸이고, "아래"도 세로 병합 폭만큼 건너뜁니다. 반드시 목록에 실제로 있는
+  좌표만 쓰세요.
+
+## 표준 슬롯 (7개 — 이 양식에 있는 것만)
+{slots}
 
 ## 표 셀 목록
 {grid}
 
-## 채워야 할 표준 슬롯
-{slots}
+## 작업 지시 (순서대로)
+1. 표준 슬롯 7개 각각에 대해 그 의미에 맞는 라벨을 표 전체에서 찾아
+   (예: "일 시"/"일시"/"회의일시" → meeting_date), 입력 칸의 표·행·열을 slots에
+   넣으세요. 찾지 못한 슬롯은 slots에 넣지 마세요(슬롯명 임의 생성 금지).
+2. 1번에서 쓴 라벨·입력 칸을 **제외한** 나머지 라벨 칸들을 훑어 pins에 추가하세요.
+   - 표준 슬롯에 쓴 칸을 pins에 다시 넣지 마세요(표준 우선, 중복 금지).
+   - 표 전체 폭만큼 가로 병합된 셀은 보통 제목/구분선이니 라벨 후보에서 제외하세요.
+   - 인접한 빈 칸이 없거나 라벨이 불분명하면 건너뜁니다(억지로 만들지 않음).
+   - 한 입력 칸에 항목 하나만. 라벨 칸 자신을 입력 칸으로 반환하지 마세요.
 
-## 작업
-각 표준 슬롯에 대해, 그 값이 실제로 입력될 셀의 좌표 [행, 열]을 cell_map으로 반환하세요.
-- 라벨 셀(예: "사업명"이라고 적힌 셀)이 아니라, 그 **오른쪽/아래의 값 셀** 좌표를 지정합니다.
-- 우선순위: 라벨 셀의 ① 오른쪽 셀 → ② 아래 셀. 이미 다른 라벨 텍스트가 있는 셀은 고르지 마세요.
-- 좌표는 위 목록의 (행,열) 숫자를 그대로 사용합니다.
-- 적절한 셀을 찾을 수 없는 슬롯은 cell_map에 넣지 말고 unmapped에 슬롯명을 넣으세요.
-- 슬롯명을 임의로 만들지 않습니다(목록의 7개만 사용).
+## 까다로운 패턴
+- 한 행에 라벨 2쌍: (2,0)"성명" (2,1)빈칸 (2,2)"연락처" (2,3)빈칸이면
+  "성명"→(2,1), "연락처"→(2,3)입니다. (2,1)을 연락처에 쓰지 마세요.
+- 라벨 칸에 "작성자:"처럼 콜론이 있고 오른쪽/아래에 별도 빈 칸이 없으면 그 항목은
+  건너뛰세요(같은 셀 이어쓰기는 지원하지 않습니다).
 
 JSON으로만 답하세요:
-{{"cell_map": {{"business_name": [행,열], ...}}, "unmapped": ["slot", ...]}}
+{{"slots": [{{"slot":"business_name","table":0,"row":1,"col":1}}, ...],
+ "pins": [{{"table":0,"row":0,"col":0,"label":"라벨 텍스트"}}, ...]}}
 """
 
 
-def map_minutes_cells(grid_cells: list, provider: str = "gemini",
-                      api_key: str = "", model: str = "gemini-flash-latest",
-                      timeout: int = 30) -> dict:
-    """표 그리드 → 슬롯별 셀좌표 매핑 (선택된 AI 프로바이더 호출).
+def map_minutes_form(grid_cells: list, provider: str = "gemini",
+                     api_key: str = "", model: str = "gemini-flash-latest",
+                     timeout: int = 45) -> dict:
+    """표준 7슬롯 매핑 + 커스텀 라벨 핀을 AI 1회 호출로 동시 산출.
 
-    반환: {"ok": bool, "cell_map": {slot: [r,c]}, "unmapped": [slot], "error"?: str}
+    레거시 개별 매핑 함수 2종(표준 슬롯 매핑·커스텀 라벨링)의 통합 대체.
+    후검증(코드가 최종 방어선): 좌표 실존성, 표준↔커스텀 교차 중복(표준 우선),
+    커스텀 핀은 빈 셀만/표준은 견본 텍스트 허용(비대칭), 병합 폭 기반 인접성은
+    경고만(오탐 시 사용자가 지울 수 있게 제거하지 않음).
+
+    반환: {"ok", "cell_map": {slot: [t,r,c]}, "unmapped": [slot],
+           "pins": [{table,row,col,label}], "warnings": [str], "error"?}
     """
     if not api_key:
         return {"ok": False, "error": "AI API 키가 없어 자동 분석을 건너뜁니다.",
-                "cell_map": {}, "unmapped": list(MINUTES_SLOTS.keys())}
+                "cell_map": {}, "unmapped": list(MINUTES_SLOTS.keys()),
+                "pins": [], "warnings": []}
 
-    grid_lines = "\n".join(
-        f"  ({c['row']},{c['col']}): {c['text'] or '(빈 셀)'}" for c in grid_cells)
     slot_lines = "\n".join(f"  {k}: {v}" for k, v in MINUTES_SLOTS.items())
-    prompt = _PROMPT_TMPL.format(grid=grid_lines, slots=slot_lines)
-
-    # cell_map은 동적 키 객체라 strict 스키마 불가 → JSON 모드(schema=None)
-    r = llm.complete_json(provider, api_key, model, prompt, schema=None, timeout=timeout)
+    prompt = _FORM_PROMPT_TMPL.format(slots=slot_lines,
+                                      grid=_serialize_grid(grid_cells))
+    r = llm.complete_json(provider, api_key, model, prompt, schema=None,
+                          timeout=timeout)
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error", "AI 호출 실패"),
-                "cell_map": {}, "unmapped": list(MINUTES_SLOTS.keys())}
-
-    data = r["data"] or {}
-    raw_map = data.get("cell_map", {}) or {}
-    cell_map, unmapped = {}, list(data.get("unmapped", []) or [])
-    # 검증: 알려진 슬롯 + [정수,정수] 형태만 수용
-    for slot, rc in raw_map.items():
-        if slot not in MINUTES_SLOTS:
-            continue
-        try:
-            cell_map[slot] = [int(rc[0]), int(rc[1])]
-        except (TypeError, ValueError, IndexError):
-            if slot not in unmapped:
-                unmapped.append(slot)
-    # 매핑 안 된 슬롯 보충
-    for slot in MINUTES_SLOTS:
-        if slot not in cell_map and slot not in unmapped:
-            unmapped.append(slot)
-    return {"ok": True, "cell_map": cell_map, "unmapped": unmapped}
-
-
-_AUTO_PROMPT_TMPL = """당신은 한글(HWPX) 양식(회의록·상담일지 등) 표 분석가입니다.
-아래는 양식의 모든 표 셀입니다. 각 셀은 `(표,행,열): 텍스트` 형식이며, 값이 없으면 `(빈 셀)`입니다.
-
-## 개념
-- '라벨 칸' = 항목 이름이 적힌 셀(예: "회사명", "제품명", "상담내용", "일 시", "참석자").
-- '입력 칸' = 그 값이 들어갈 **빈 셀**. 보통 라벨 칸의 **바로 오른쪽(같은 행, 열+1)** 또는
-  **바로 아래(행+1, 같은 열)**에 있습니다.
-
-## 규칙 (정확도 핵심)
-- 각 라벨 칸마다 **같은 표 안**에서 인접한 **빈 셀**을 입력 칸으로 고릅니다(표 번호를 바꾸지 마세요).
-- 우선순위: ① 오른쪽 빈 셀 → ② 아래 빈 셀.
-- **이미 텍스트가 있는 셀은 입력 칸으로 고르지 마세요**(그건 다른 라벨/제목/머리글입니다).
-- 한 입력 칸에는 항목 하나만(좌표 중복 금지). 라벨 칸 자신을 입력 칸으로 반환하지 마세요.
-- 인접한 빈 셀이 없거나 라벨이 불분명하면 그 항목은 **건너뜁니다**(억지로 만들지 않음).
-- 좌표 숫자는 위 목록의 값을 그대로 사용합니다.
-
-## 표 셀 목록
-{grid}
-
-## 작업
-각 라벨 칸의 입력 칸 (표,행,열)과 항목명(라벨 텍스트 그대로)을 pins로 반환하세요.
-JSON으로만 답하세요:
-{{"pins": [{{"table": 0, "row": 0, "col": 1, "label": "회사명"}}, ...]}}
-"""
-
-
-def auto_label_cells(grid_cells: list, provider: str = "gemini",
-                     api_key: str = "", model: str = "gemini-flash-latest",
-                     timeout: int = 30) -> dict:
-    """라벨 칸을 AI로 식별해 대응 입력 칸에 항목명 핀을 생성 (비표준 양식용).
-
-    map_minutes_cells(표준 7슬롯)와 달리 임의 항목명을 자동 라벨링한다.
-    반환: {"ok": bool, "pins": [{table,row,col,label}], "error"?: str}
-      - 실제 grid에 존재하는 (table,row,col)만 수용, 중복 좌표·빈 라벨 제거(1셀=1핀).
-      - 키 없으면 {ok:False, error:"AI 키 없음", pins:[]}.
-    """
-    if not api_key:
-        return {"ok": False, "error": "AI 키 없음", "pins": []}
-
-    grid_lines = "\n".join(
-        f"  ({c.get('table', 0)},{c['row']},{c['col']}): {c.get('text') or '(빈 셀)'}"
-        for c in grid_cells)
-    prompt = _AUTO_PROMPT_TMPL.format(grid=grid_lines)
-
-    r = llm.complete_json(provider, api_key, model, prompt, schema=None, timeout=timeout)
-    if not r.get("ok"):
-        return {"ok": False, "error": r.get("error", "AI 호출 실패"), "pins": []}
+                "cell_map": {}, "unmapped": list(MINUTES_SLOTS.keys()),
+                "pins": [], "warnings": []}
 
     data = r.get("data") or {}
-    valid = {(c.get("table", 0), c["row"], c["col"]) for c in grid_cells}
-    pins, seen = [], set()
-    for p in (data.get("pins") or []):
-        if not isinstance(p, dict):
+    by_coord = {(int(c.get("table", 0)), c["row"], c["col"]): c for c in grid_cells}
+    by_table = {}
+    for c in grid_cells:
+        by_table.setdefault(int(c.get("table", 0)), []).append(c)
+    warnings = []
+
+    def _adjacent_label_ok(cell):
+        cells_t = by_table.get(int(cell.get("table", 0)), [])
+        for nb in (_neighbor_left(cells_t, cell), _neighbor_above(cells_t, cell)):
+            if nb is not None and (nb.get("text") or "").strip():
+                return True
+        return False
+
+    # 1) 표준 슬롯 — 실존성 + 슬롯명 검증(견본 텍스트 허용)
+    cell_map, used = {}, set()
+    for s in (data.get("slots") or []):
+        if not isinstance(s, dict):
+            continue
+        slot = s.get("slot")
+        if slot not in MINUTES_SLOTS or slot in cell_map:
             continue
         try:
-            t, row, col = int(p["table"]), int(p["row"]), int(p["col"])
+            key = (int(s["table"]), int(s["row"]), int(s["col"]))
         except (TypeError, ValueError, KeyError):
+            continue
+        if key not in by_coord or key in used:
+            continue
+        cell_map[slot] = [key[0], key[1], key[2]]
+        used.add(key)
+        if not _adjacent_label_ok(by_coord[key]):
+            warnings.append(f"{slot}: 인접 라벨을 찾지 못함 — 위치 확인 권장")
+
+    # 2) 커스텀 핀 — 실존성 + 빈 셀 + 교차/내부 중복 제거
+    pins = []
+    for p in (data.get("pins") or []):
+        if not isinstance(p, dict):
             continue
         label = p.get("label")
         if not isinstance(label, str) or not label.strip():
             continue
-        if (t, row, col) not in valid or (t, row, col) in seen:
+        try:
+            key = (int(p["table"]), int(p["row"]), int(p["col"]))
+        except (TypeError, ValueError, KeyError):
             continue
-        seen.add((t, row, col))
-        pins.append({"table": t, "row": row, "col": col, "label": label.strip()})
-    return {"ok": True, "pins": pins}
+        if key not in by_coord or key in used:
+            continue
+        if (by_coord[key].get("text") or "").strip():
+            continue                              # 커스텀은 빈 셀만
+        used.add(key)
+        pins.append({"table": key[0], "row": key[1], "col": key[2],
+                     "label": label.strip()})
+        if not _adjacent_label_ok(by_coord[key]):
+            warnings.append(f"커스텀 '{label.strip()}': 인접 라벨 없음 — 확인 권장")
+
+    unmapped = [s for s in MINUTES_SLOTS if s not in cell_map]
+    return {"ok": True, "cell_map": cell_map, "unmapped": unmapped,
+            "pins": pins, "warnings": warnings}
 
 
 def is_standard_map(cell_map: dict) -> bool:
-    """cell_map 이 표준 양식 좌표(DEFAULT_CELLS)와 완전히 동일하면 True."""
+    """cell_map이 표준 양식 좌표(DEFAULT_CELLS, 전부 표0)와 완전히 동일하면 True.
+
+    좌표는 2요소([r,c]=표0, v1/v2 호환)든 3요소([t,r,c], v3)든 모두 판정.
+    """
     if set(cell_map.keys()) != set(DEFAULT_CELLS.keys()):
         return False
-    for slot, (r, c) in DEFAULT_CELLS.items():
+    for slot, (t, r, c) in DEFAULT_CELLS.items():
         rc = cell_map.get(slot)
-        if not rc or int(rc[0]) != r or int(rc[1]) != c:
+        try:
+            got = ((int(rc[0]), int(rc[1]), int(rc[2])) if len(rc) >= 3
+                   else (0, int(rc[0]), int(rc[1])))
+        except (TypeError, ValueError, IndexError):
+            return False
+        if got != (t, r, c):
             return False
     return True
 
@@ -196,11 +253,16 @@ def load_minutes_fieldmap(template_path: str) -> dict:
 
 
 def save_minutes_fieldmap(template_path: str, map_result: dict) -> str:
-    """AI 매핑 결과를 .minutes.fieldmap.json 으로 저장."""
+    """AI 매핑 결과를 .minutes.fieldmap.json 으로 저장 (v3, 좌표 [table,row,col]).
+
+    map_result["cell_map"]은 구버전 저장 포맷([행,열] 2요소)과
+    map_minutes_form([표,행,열] 3요소, 다중 표) 양쪽에서 올 수 있어
+    _norm_cell_map으로 항상 3요소로 정규화한 뒤 저장한다.
+    """
     path = _fieldmap_path(template_path)
-    cell_map = map_result.get("cell_map", {})
+    cell_map = _norm_cell_map(map_result.get("cell_map", {}))
     data = {
-        "version": 1,
+        "version": 3,
         "template": os.path.basename(template_path),
         "is_standard": is_standard_map(cell_map),
         "cell_map": cell_map,
@@ -211,25 +273,34 @@ def save_minutes_fieldmap(template_path: str, map_result: dict) -> str:
     return path
 
 
-# ── fieldmap v2: 사용자 편집본 저장 (cell_map + custom_slots + annotations) ────
+# ── fieldmap v3: 사용자 편집본 저장 (cell_map + custom_slots + annotations, 좌표 항상 [table,row,col]) ────
 
 def _norm_cell_map(cell_map: dict) -> dict:
-    """cell_map(JSON 유래)에서 표준 7슬롯·[정수,정수]만 수용해 정규화."""
+    """cell_map(JSON 유래)에서 표준 7슬롯만 수용, 항상 [table,row,col] 3요소로 정규화.
+
+    2요소([행,열]) 입력은 table=0으로 승격(단일 표 전제의 구버전 호환), 3요소는
+    그대로 정수화. 그 외 형태(길이 0/1 등)는 무시.
+    """
     out = {}
     for slot, rc in (cell_map or {}).items():
         if slot not in MINUTES_SLOTS:
             continue
         try:
-            out[slot] = [int(rc[0]), int(rc[1])]
+            if len(rc) >= 3:
+                out[slot] = [int(rc[0]), int(rc[1]), int(rc[2])]
+            else:
+                out[slot] = [0, int(rc[0]), int(rc[1])]
         except (TypeError, ValueError, IndexError):
             continue
     return out
 
 
 def _validate_custom_slots(custom_slots) -> tuple:
-    """custom_slots [{id, label, cell:[r,c]}] 검증. (정규화 리스트, 경고) 반환.
+    """custom_slots [{id, label, cell:[table,row,col] 또는 [row,col]}] 검증.
 
-    잘못된 항목(누락 id·라벨 비문자열·정수쌍 아님)은 무시하고 경고에 담는다.
+    (정규화 리스트, 경고) 반환. cell은 항상 [table,row,col] 3요소로 정규화해
+    담는다(2요소 입력은 table=0 승격).
+    잘못된 항목(누락 id·라벨 비문자열·좌표 형식 오류)은 무시하고 경고에 담는다.
     id 중복도 거부(첫 항목만 유지) — 생성 시 custom_fields[id] 충돌 방지.
     """
     out, warnings, seen_ids = [], [], set()
@@ -247,7 +318,10 @@ def _validate_custom_slots(custom_slots) -> tuple:
             warnings.append(f"custom_slot '{sid}' 라벨 타입 오류 — 무시")
             continue
         try:
-            r, c = int(cell[0]), int(cell[1])
+            if len(cell) >= 3:
+                t, r, c = int(cell[0]), int(cell[1]), int(cell[2])
+            else:
+                t, r, c = 0, int(cell[0]), int(cell[1])
         except (TypeError, ValueError, IndexError, KeyError):
             warnings.append(f"custom_slot '{sid}' 셀 좌표 오류 — 무시")
             continue
@@ -255,7 +329,7 @@ def _validate_custom_slots(custom_slots) -> tuple:
             warnings.append(f"custom_slot id '{sid}' 중복 — 무시")
             continue
         seen_ids.add(sid)
-        out.append({"id": sid, "label": label, "cell": [r, c]})
+        out.append({"id": sid, "label": label, "cell": [t, r, c]})
     return out, warnings
 
 
@@ -307,12 +381,13 @@ def _validate_annotations(annotations) -> tuple:
 
 def save_minutes_cellmap(template_path: str, cell_map: dict,
                          custom_slots=None, annotations=None) -> dict:
-    """사용자 편집본을 .minutes.fieldmap.json version 2로 저장.
+    """사용자 편집본을 .minutes.fieldmap.json version 3로 저장.
 
-    구조: {version:2, template, is_standard, cell_map, unmapped,
+    구조: {version:3, template, is_standard, cell_map, unmapped,
            custom_slots, annotations}
-    is_standard 는 cell_map 으로 재계산. 잘못된 custom_slots/annotations 항목은
-    무시하고 warnings 로 보고(저장은 진행).
+    cell_map 값·custom_slots[].cell 은 항상 [table,row,col] 3요소로 정규화되어
+    저장된다(2요소 입력은 table=0 승격). is_standard 는 cell_map 으로 재계산.
+    잘못된 custom_slots/annotations 항목은 무시하고 warnings 로 보고(저장은 진행).
 
     반환: 저장한 fieldmap dict + {"path", "warnings"}.
     """
@@ -321,7 +396,7 @@ def save_minutes_cellmap(template_path: str, cell_map: dict,
     anns, ann_warn = _validate_annotations(annotations)
 
     data = {
-        "version": 2,
+        "version": 3,
         "template": os.path.basename(template_path),
         "is_standard": is_standard_map(cells),
         "cell_map": cells,

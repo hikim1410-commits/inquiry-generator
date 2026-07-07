@@ -434,3 +434,86 @@ def test_normalize_preserves_custom_fields():
     # 부재 시 키 자체가 없어야(기존 출력 불변)
     out2 = _normalize_minutes(dict(SAMPLE_DATA))
     assert "custom_fields" not in out2
+
+
+# ── T3: 좌표 3요소화 — DEFAULT_CELLS/_norm_cells 3-tuple ─────────────────────
+
+def test_norm_cells_accepts_2_and_3_elem():
+    from src.minutes.hwpx_minutes import _norm_cells
+    cells = _norm_cells({"business_name": [4, 2],          # 2요소 = 표0
+                         "meeting_date": [1, 3, 1]})        # 3요소
+    assert cells["business_name"] == (0, 4, 2)
+    assert cells["meeting_date"] == (1, 3, 1)
+    assert cells["content"] == (0, 6, 1)                    # 기본값도 3-tuple
+
+
+# ── 다중표 생성 (T4) ─────────────────────────────────────────────────────────
+
+def _mt_data():
+    return {"business_name": "표1 테스트", "meeting_date": "2026. 07. 07.",
+            "meeting_place": "본사", "meeting_topic": "다중표",
+            "participants": ["내비온 김형일"], "total_count": 1,
+            "sections": [{"type": "header", "text": " ■ 안건"}]}
+
+def test_build_writes_to_table1(tmp_path, make_multi_table_tpl):
+    tpl = make_multi_table_tpl(str(tmp_path))
+    out = str(tmp_path / "mt_out.hwpx")
+    cm = {"business_name": [1, 1, 1]}       # 표1의 (1,1)
+    r = build_minutes(_mt_data(), template_hwpx=tpl, out_path=out, cell_map=cm)
+    assert r["ok"], r.get("error")
+    root = _parse_section0(out)
+    from src.minutes.hwpx_minutes import _iter_top_tables, _find_cell
+    tables = _iter_top_tables(root)
+    assert len(tables) == 2
+    tc = _find_cell(tables[1], 1, 1)         # 표1 물리 엘리먼트에서 직접 확인
+    assert any("표1 테스트" in (t.text or "") for t in tc.findall(f'.//{_HP}t'))
+    tc0 = _find_cell(tables[0], 1, 1)        # 표0 같은 좌표는 미기록(빈값/원본 유지)
+    assert not any("표1 테스트" in (t.text or "") for t in tc0.findall(f'.//{_HP}t'))
+
+def test_build_table1_and_photo_preserved(tmp_path, make_multi_table_tpl):
+    """사진표(표0 content 내 중첩)를 보존하면서 표1에도 쓰기 — findall[N] 오인 회귀 방지."""
+    tpl = make_multi_table_tpl(str(tmp_path))
+    out = str(tmp_path / "mt_photo.hwpx")
+    r = build_minutes(_mt_data(), template_hwpx=tpl, out_path=out,
+                      cell_map={"business_name": [1, 1, 1]})
+    assert r["ok"]
+    root = _parse_section0(out)
+    from src.minutes.hwpx_minutes import _iter_top_tables, _find_cell
+    tables = _iter_top_tables(root)
+    tc_content = _find_cell(tables[0], 6, 1)  # 표0 content(기본 좌표)에 사진표 잔존
+    assert tc_content.find(f'.//{_HP}tbl') is not None
+
+def test_build_table_out_of_range_skips_with_warning(tmp_path, make_multi_table_tpl):
+    tpl = make_multi_table_tpl(str(tmp_path))
+    out = str(tmp_path / "mt_oob.hwpx")
+    r = build_minutes(_mt_data(), template_hwpx=tpl, out_path=out,
+                      cell_map={"business_name": [5, 1, 1]})   # 표5 없음
+    assert r["ok"]                                             # 크래시 없이 생성
+    assert any("표 6" in w for w in r.get("warnings", []))     # 1-based 표기 경고
+
+def test_empty_participants_on_table1_keeps_paragraph(tmp_path, make_multi_table_tpl):
+    """한글 크래시 방지 불변식이 표1에서도 유지되는지."""
+    tpl = make_multi_table_tpl(str(tmp_path))
+    out = str(tmp_path / "mt_empty_p.hwpx")
+    d = _mt_data(); d["participants"] = []
+    r = build_minutes(d, template_hwpx=tpl, out_path=out,
+                      cell_map={"participants": [1, 5, 1]})
+    assert r["ok"]
+    root = _parse_section0(out)
+    from src.minutes.hwpx_minutes import _iter_top_tables, _find_cell
+    tc = _find_cell(_iter_top_tables(root)[1], 5, 1)
+    sl = tc.find(f'{_HP}subList')
+    assert len(sl.findall(f'{_HP}p')) >= 1
+
+def test_custom_slot_on_table1(tmp_path, make_multi_table_tpl):
+    tpl = make_multi_table_tpl(str(tmp_path))
+    out = str(tmp_path / "mt_custom.hwpx")
+    d = _mt_data(); d["custom_fields"] = {"c1_3_1": "홍길동"}
+    r = build_minutes(d, template_hwpx=tpl, out_path=out,
+                      custom_slots=[{"id": "c1_3_1", "label": "작성자",
+                                     "cell": [1, 3, 1]}])
+    assert r["ok"]
+    root = _parse_section0(out)
+    from src.minutes.hwpx_minutes import _iter_top_tables, _find_cell
+    tc = _find_cell(_iter_top_tables(root)[1], 3, 1)
+    assert any("홍길동" in (t.text or "") for t in tc.findall(f'.//{_HP}t'))

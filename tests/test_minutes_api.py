@@ -182,43 +182,6 @@ def test_get_minutes_template():
     assert r["name"].endswith(".hwpx")
 
 
-# ── 양식 스캔 fieldmap 캐시 보호 (AI 실패 시 기존 매핑 보존) ──────────────────
-
-def test_scan_minutes_template_ai_failure_keeps_existing_fieldmap(workdir):
-    """API 키 없음 등으로 AI 매핑이 실패해도, 이전의 정상 fieldmap을
-    빈 매핑으로 덮어쓰지 않아야 한다 (재스캔 중 일시 오류 보호)."""
-    import shutil
-    from src.minutes.hwpx_minutes import TEMPLATE_MINUTES
-    from src.ai.minutes_template_mapper import (save_minutes_fieldmap,
-                                                load_minutes_fieldmap)
-    tpl = os.path.join(workdir, "커스텀양식.hwpx")
-    shutil.copy2(TEMPLATE_MINUTES, tpl)
-    good = {"cell_map": {"business_name": [2, 2], "meeting_topic": [3, 1]},
-            "unmapped": []}
-    save_minutes_fieldmap(tpl, good)
-
-    api = _api(workdir)          # AI 키 없음 → map_minutes_cells 실패 경로
-    r = api.scan_minutes_template(tpl)
-    assert r["ok"] and r.get("ai_error")
-    kept = load_minutes_fieldmap(tpl)
-    assert kept["cell_map"] == good["cell_map"]   # 기존 매핑 보존
-
-
-def test_scan_minutes_template_first_scan_caches_even_on_ai_failure(workdir):
-    """기존 캐시가 없으면 AI 실패라도 fieldmap을 생성해 둔다 (스캔 사실 기록)."""
-    import shutil
-    from src.minutes.hwpx_minutes import TEMPLATE_MINUTES
-    from src.ai.minutes_template_mapper import load_minutes_fieldmap
-    tpl = os.path.join(workdir, "신규양식.hwpx")
-    shutil.copy2(TEMPLATE_MINUTES, tpl)
-
-    api = _api(workdir)
-    r = api.scan_minutes_template(tpl)
-    assert r["ok"] and r.get("ai_error")
-    fm = load_minutes_fieldmap(tpl)
-    assert fm and fm["cell_map"] == {}
-
-
 # ── T-A2-2: scan_minutes_grid / save_minutes_cellmap / scan_template grid ────
 
 def _copy_template(workdir, name="격자양식.hwpx"):
@@ -258,56 +221,83 @@ def test_save_minutes_cellmap_api_roundtrip(workdir):
     r = api.save_minutes_cellmap(tpl, cell_map, custom, anns)
     assert r["ok"], r.get("error")
     fm = load_minutes_fieldmap(tpl)
-    assert fm["version"] == 2
-    assert fm["cell_map"] == {"business_name": [2, 2]}
-    assert fm["custom_slots"] == custom
+    assert fm["version"] == 3
+    assert fm["cell_map"] == {"business_name": [0, 2, 2]}
+    assert fm["custom_slots"] == [{"id": "dept", "label": "부서", "cell": [0, 1, 2]}]
     assert fm["annotations"] == [{"table": 0, **anns[0]}]   # table 기본 0 부여
 
 
-def test_auto_label_minutes_form_fills_nxny(monkeypatch, workdir):
-    """auto_label_minutes_form: grid 조회 → auto_label_cells 호출 → nx,ny 채움.
-    auto_label_cells를 모킹해 첫 셀에 핀을 만들고, API가 해당 셀 중심을 채우는지 확인."""
+# ── T8: 통합 엔드포인트 map_minutes_form (레거시 개별 엔드포인트 2종 대체) ──────
+
+def test_map_minutes_form_endpoint(monkeypatch, workdir):
+    """map_minutes_form: grid 스캔 + mtm.map_minutes_form(통합 AI 호출) 1회로
+    cell_map/pins(+nx,ny)/grid/fieldmap_path를 한 번에 반환."""
     import src.ai.minutes_template_mapper as mtm
-    tpl = _copy_template(workdir, "자동양식.hwpx")
+    tpl = _copy_template(workdir, "통합양식.hwpx")
     api = _api(workdir)
 
-    def fake_auto(grid_cells, provider, api_key, model, timeout=30):
-        c = grid_cells[0]
-        return {"ok": True, "pins": [{"table": c.get("table", 0), "row": c["row"],
-                                      "col": c["col"], "label": "자동라벨"}]}
+    def fake_map_form(cells, *a, **k):
+        c = cells[0]                 # 실제 격자의 첫 셀 → nx,ny 검증용 실존 좌표
+        return {"ok": True, "cell_map": {"business_name": [0, 1, 1]},
+                "unmapped": [], "pins": [{"table": c.get("table", 0), "row": c["row"],
+                                          "col": c["col"], "label": "작성자"}],
+                "warnings": []}
 
-    monkeypatch.setattr(mtm, "auto_label_cells", fake_auto)
-    r = api.auto_label_minutes_form(tpl)
-    assert r["ok"], r.get("error")
-    assert len(r["pins"]) == 1
+    monkeypatch.setattr(mtm, "map_minutes_form", fake_map_form)
+    r = api.map_minutes_form(tpl)
+    assert r["ok"] and r["ai_used"]
+    assert r["cell_map"] == {"business_name": [0, 1, 1]}
+    assert r["unmapped"] == [] and r["warnings"] == []
+    assert r["slot_labels"]
+    assert r["is_standard"] is False   # cell_map에 표준 7슬롯 중 1개만 채움
     p = r["pins"][0]
-    assert p["label"] == "자동라벨"
-    assert "nx" in p and "ny" in p
-    assert 0.0 <= p["nx"] <= 1.0 and 0.0 <= p["ny"] <= 1.0
+    assert p["label"] == "작성자"
+    assert 0.0 <= p["nx"] <= 1.0 and 0.0 <= p["ny"] <= 1.0   # 셀 중심 좌표 주입
+    assert "grid" in r and r["grid"]["ok"]
+    assert os.path.exists(r["fieldmap_path"])                 # 캐시 저장 승계
 
 
-def test_auto_label_minutes_form_no_key(workdir):
-    """AI 키 없으면 ok:False + 빈 pins (안내)."""
-    tpl = _copy_template(workdir, "노키양식.hwpx")
-    api = _api(workdir)               # AI 키 없음
-    r = api.auto_label_minutes_form(tpl)
-    assert not r["ok"]
-    assert r.get("pins") == []
+def test_map_minutes_form_ai_failure_keeps_existing_fieldmap(workdir):
+    """AI 키 없음 등으로 통합 매핑이 실패해도 기존 정상 fieldmap을
+    빈 매핑으로 덮어쓰지 않는다 (이전 개별 엔드포인트와 동일한 캐시 보호 규칙)."""
+    from src.ai.minutes_template_mapper import (save_minutes_fieldmap,
+                                                 load_minutes_fieldmap)
+    tpl = _copy_template(workdir, "통합캐시양식.hwpx")
+    good = {"cell_map": {"business_name": [2, 2], "meeting_topic": [3, 1]},
+            "unmapped": []}
+    save_minutes_fieldmap(tpl, good)
+
+    api = _api(workdir)          # AI 키 없음 → map_minutes_form 실패 경로
+    r = api.map_minutes_form(tpl)
+    assert r["ok"] and r.get("ai_error")
+    kept = load_minutes_fieldmap(tpl)
+    assert kept["cell_map"] == {"business_name": [0, 2, 2], "meeting_topic": [0, 3, 1]}
 
 
-def test_auto_label_minutes_form_missing_file(workdir):
+def test_map_minutes_form_first_scan_caches_even_on_ai_failure(workdir):
+    """기존 캐시가 없으면 AI 실패라도 fieldmap을 생성해 둔다 (스캔 사실 기록).
+
+    T11: 구 표준 슬롯 스캔 엔드포인트 대상 테스트를 map_minutes_form으로 이관한 것 —
+    같은 불변식(최초 스캔 시 캐시 보호)에 더해, 구 커스텀 라벨링 엔드포인트의
+    '키 없으면 pins도 빈 배열' 검증까지 함께 흡수한다."""
+    import shutil
+    from src.minutes.hwpx_minutes import TEMPLATE_MINUTES
+    from src.ai.minutes_template_mapper import load_minutes_fieldmap
+    tpl = os.path.join(workdir, "신규양식.hwpx")
+    shutil.copy2(TEMPLATE_MINUTES, tpl)
+
     api = _api(workdir)
-    r = api.auto_label_minutes_form(os.path.join(workdir, "없음.hwpx"))
+    r = api.map_minutes_form(tpl)
+    assert r["ok"] and r.get("ai_error")
+    assert r["pins"] == []
+    fm = load_minutes_fieldmap(tpl)
+    assert fm and fm["cell_map"] == {}
+
+
+def test_map_minutes_form_missing_file(workdir):
+    api = _api(workdir)
+    r = api.map_minutes_form(os.path.join(workdir, "없음.hwpx"))
     assert not r["ok"]
-
-
-def test_scan_minutes_template_includes_grid(workdir):
-    tpl = _copy_template(workdir, "AI양식.hwpx")
-    api = _api(workdir)              # AI 실패 경로지만 grid는 항상 포함
-    r = api.scan_minutes_template(tpl)
-    assert r["ok"]
-    assert "grid" in r and r["grid"].get("ok")
-    assert any(c["colspan"] > 1 for c in r["grid"]["cells"])
 
 
 # ── T-B2-1: Preset CRUD + gallery_autoshow ───────────────────────────────────
@@ -398,9 +388,9 @@ def test_load_minutes_cellmap_roundtrip(workdir):
     r = api.load_minutes_cellmap(tpl)
     assert r["ok"], r.get("error")
     assert r["has_fieldmap"] is True
-    assert r["version"] == 2
-    assert r["cell_map"] == {"business_name": [2, 2]}
-    assert r["custom_slots"] == custom
+    assert r["version"] == 3
+    assert r["cell_map"] == {"business_name": [0, 2, 2]}
+    assert r["custom_slots"] == [{"id": "dept", "label": "부서", "cell": [0, 1, 2]}]
     assert r["annotations"] == [{"table": 0, **anns[0]}]   # table 기본 0 부여
 
 
@@ -471,21 +461,15 @@ def test_generate_minutes_drive_auto_off_skips_upload(monkeypatch, workdir):
 
 def test_generate_uses_cache_no_ai_call(monkeypatch, workdir):
     """C-3: 생성 경로는 캐시(load_minutes_fieldmap)만 사용 — 추가 AI 호출 없음.
-    AI 함수를 호출 카운터로 monkeypatch해 호출 0을 검증한다."""
+    AI 호출 함수를 카운터로 monkeypatch해 호출 0을 검증한다."""
     import src.ai.llm as _llm
-    import src.ai.minutes_template_mapper as _mtm
     calls = {"ai": 0}
 
     def _bump_llm(*a, **k):
         calls["ai"] += 1
         return {"ok": False, "error": "no-ai"}
 
-    def _bump_map(*a, **k):
-        calls["ai"] += 1
-        return {"ok": False, "cell_map": {}, "unmapped": []}
-
     monkeypatch.setattr(_llm, "complete_json", _bump_llm)
-    monkeypatch.setattr(_mtm, "map_minutes_cells", _bump_map)
 
     tpl = _copy_template(workdir, "캐시양식.hwpx")
     api = _api(workdir)

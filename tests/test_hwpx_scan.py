@@ -303,3 +303,16 @@ def test_geometry_cellsz_fallback():
     geo = hx.compute_table_geometry(cells)
     assert geo["col_w"] == [6220, 33293, 8389]
     assert geo["table_w"] == 47902
+
+
+# ── 다중표 픽스처 계약 (T1) ─────────────────────────────────────────────────
+
+def test_multi_table_fixture_two_tables(tmp_path, make_multi_table_tpl):
+    tpl = make_multi_table_tpl(str(tmp_path))
+    g = hx.scan_hwpx_grid(tpl)
+    assert g["ok"], g.get("error")
+    assert len(g["tables"]) == 2            # 표0 + 표1 (중첩 사진표는 미포함)
+    t1_cells = [c for c in g["cells"] if c["table"] == 1]
+    assert t1_cells, "표1 셀이 스캔되지 않음"
+    # 표1도 표0과 동일 구조(7×3) — (1,1) 셀 존재
+    assert any(c["row"] == 1 and c["col"] == 1 for c in t1_cells)
