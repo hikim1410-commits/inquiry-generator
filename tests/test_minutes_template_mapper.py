@@ -26,19 +26,19 @@ _AUTO_GRID = [
 ]
 
 
-def _mock_llm(monkeypatch, pins):
+def _mock_llm(monkeypatch, payload):
     monkeypatch.setattr(mtm.llm, "complete_json",
-                        lambda *a, **k: {"ok": True, "data": {"pins": pins}})
+                        lambda *a, **k: {"ok": True, "data": payload})
 
 
 def test_auto_label_drops_nonexistent_and_dupes(monkeypatch):
-    _mock_llm(monkeypatch, [
+    _mock_llm(monkeypatch, {"pins": [
         {"table": 0, "row": 0, "col": 1, "label": "회사명"},
         {"table": 0, "row": 1, "col": 1, "label": "제품명"},
         {"table": 0, "row": 9, "col": 9, "label": "없는칸"},     # (a) 존재X
         {"table": 0, "row": 0, "col": 1, "label": "중복좌표"},   # (b) 중복
         {"table": 0, "row": 1, "col": 1, "label": "  "},          # 빈 라벨
-    ])
+    ]})
     r = auto_label_cells(_AUTO_GRID, "gemini", "fakekey", "m")
     assert r["ok"]
     coords = [(p["table"], p["row"], p["col"]) for p in r["pins"]]
@@ -231,3 +231,87 @@ def test_neighbor_left_none_when_ambiguous():
     cells = [_cell(0, 0, 0, "a"), _cell(0, 1, 0, "b"),
              _cell(0, 0, 1, "", rs=2)]                          # 왼쪽 이웃 2개(모호)
     assert _neighbor_left(cells, cells[2]) is None
+
+
+# ── T7: map_minutes_form — 통합 AI 호출(표준 슬롯 + 커스텀 핀) + 후검증 ────────
+
+def _grid_std():
+    """참석자류 최소 그리드: (1,0)라벨 → (1,1)빈칸, (2,0)커스텀 라벨 → (2,1)빈칸."""
+    return [_cell(0, 0, 0, "회 의 록", cs=2),
+            _cell(0, 1, 0, "사업명"), _cell(0, 1, 1, ""),
+            _cell(0, 2, 0, "작성자"), _cell(0, 2, 1, ""),
+            _cell(0, 3, 0, "일 시"), _cell(0, 3, 1, "")]
+
+
+def test_map_form_splits_slots_and_pins(monkeypatch):
+    from src.ai.minutes_template_mapper import map_minutes_form
+    _mock_llm(monkeypatch, {
+        "slots": [{"slot": "business_name", "table": 0, "row": 1, "col": 1},
+                  {"slot": "meeting_date", "table": 0, "row": 3, "col": 1}],
+        "pins": [{"table": 0, "row": 2, "col": 1, "label": "작성자"}]})
+    r = map_minutes_form(_grid_std(), "gemini", "KEY", "m")
+    assert r["ok"]
+    assert r["cell_map"] == {"business_name": [0, 1, 1], "meeting_date": [0, 3, 1]}
+    assert r["pins"] == [{"table": 0, "row": 2, "col": 1, "label": "작성자"}]
+    assert set(r["unmapped"]) == {"meeting_place", "meeting_topic",
+                                  "participants", "total_count", "content"}
+
+def test_map_form_cross_dedup_slot_wins(monkeypatch):
+    from src.ai.minutes_template_mapper import map_minutes_form
+    _mock_llm(monkeypatch, {
+        "slots": [{"slot": "business_name", "table": 0, "row": 1, "col": 1}],
+        "pins": [{"table": 0, "row": 1, "col": 1, "label": "사업명"}]})
+    r = map_minutes_form(_grid_std(), "gemini", "KEY", "m")
+    assert r["cell_map"]["business_name"] == [0, 1, 1]
+    assert r["pins"] == []                       # 표준 우선 — 커스텀 폐기
+
+def test_map_form_rejects_nonexistent_coord(monkeypatch):
+    from src.ai.minutes_template_mapper import map_minutes_form
+    _mock_llm(monkeypatch, {
+        "slots": [{"slot": "business_name", "table": 0, "row": 9, "col": 9}],
+        "pins": [{"table": 3, "row": 0, "col": 0, "label": "유령"}]})
+    r = map_minutes_form(_grid_std(), "gemini", "KEY", "m")
+    assert "business_name" in r["unmapped"]      # 실존성 탈락 → unmapped
+    assert r["pins"] == []
+
+def test_map_form_pin_requires_blank_cell(monkeypatch):
+    from src.ai.minutes_template_mapper import map_minutes_form
+    _mock_llm(monkeypatch, {
+        "slots": [],
+        "pins": [{"table": 0, "row": 3, "col": 0, "label": "일시"}]})  # 라벨 칸(텍스트 有)
+    r = map_minutes_form(_grid_std(), "gemini", "KEY", "m")
+    assert r["pins"] == []
+
+def test_map_form_slot_allows_sample_text(monkeypatch):
+    """표준 슬롯 입력 칸은 견본 텍스트 허용 — '(총 N명)' 관례."""
+    from src.ai.minutes_template_mapper import map_minutes_form
+    grid = _grid_std() + [_cell(0, 4, 0, "참석자"), _cell(0, 4, 1, "(총 N명)")]
+    _mock_llm(monkeypatch, {
+        "slots": [{"slot": "total_count", "table": 0, "row": 4, "col": 1}], "pins": []})
+    r = map_minutes_form(grid, "gemini", "KEY", "m")
+    assert r["cell_map"]["total_count"] == [0, 4, 1]
+
+def test_map_form_unknown_slot_and_dup_coord(monkeypatch):
+    from src.ai.minutes_template_mapper import map_minutes_form
+    _mock_llm(monkeypatch, {
+        "slots": [{"slot": "alien_slot", "table": 0, "row": 1, "col": 1}],
+        "pins": [{"table": 0, "row": 2, "col": 1, "label": "작성자"},
+                 {"table": 0, "row": 2, "col": 1, "label": "중복"}]})
+    r = map_minutes_form(_grid_std(), "gemini", "KEY", "m")
+    assert r["cell_map"] == {}
+    assert [p["label"] for p in r["pins"]] == ["작성자"]
+
+def test_map_form_no_key():
+    from src.ai.minutes_template_mapper import map_minutes_form
+    r = map_minutes_form(_grid_std(), "gemini", "", "m")
+    assert not r["ok"] and r["cell_map"] == {} and r["pins"] == []
+
+def test_map_form_adjacency_warning_not_removal(monkeypatch):
+    """인접 라벨 없는 핀은 제거 대신 경고 유지(사용자가 지울 수 있게)."""
+    from src.ai.minutes_template_mapper import map_minutes_form
+    grid = _grid_std() + [_cell(0, 9, 5, "")]     # 고립된 빈 셀
+    _mock_llm(monkeypatch, {
+        "slots": [], "pins": [{"table": 0, "row": 9, "col": 5, "label": "고아"}]})
+    r = map_minutes_form(grid, "gemini", "KEY", "m")
+    assert [p["label"] for p in r["pins"]] == ["고아"]
+    assert any("인접" in w for w in r["warnings"])
