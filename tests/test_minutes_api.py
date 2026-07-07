@@ -312,6 +312,59 @@ def test_scan_minutes_template_includes_grid(workdir):
     assert any(c["colspan"] > 1 for c in r["grid"]["cells"])
 
 
+# ── T8: 통합 엔드포인트 map_minutes_form (scan_minutes_template + auto_label_minutes_form 대체) ──
+
+def test_map_minutes_form_endpoint(monkeypatch, workdir):
+    """map_minutes_form: grid 스캔 + mtm.map_minutes_form(통합 AI 호출) 1회로
+    cell_map/pins(+nx,ny)/grid/fieldmap_path를 한 번에 반환."""
+    import src.ai.minutes_template_mapper as mtm
+    tpl = _copy_template(workdir, "통합양식.hwpx")
+    api = _api(workdir)
+
+    def fake_map_form(cells, *a, **k):
+        c = cells[0]                 # 실제 격자의 첫 셀 → nx,ny 검증용 실존 좌표
+        return {"ok": True, "cell_map": {"business_name": [0, 1, 1]},
+                "unmapped": [], "pins": [{"table": c.get("table", 0), "row": c["row"],
+                                          "col": c["col"], "label": "작성자"}],
+                "warnings": []}
+
+    monkeypatch.setattr(mtm, "map_minutes_form", fake_map_form)
+    r = api.map_minutes_form(tpl)
+    assert r["ok"] and r["ai_used"]
+    assert r["cell_map"] == {"business_name": [0, 1, 1]}
+    assert r["unmapped"] == [] and r["warnings"] == []
+    assert r["slot_labels"]
+    assert r["is_standard"] is False   # cell_map에 표준 7슬롯 중 1개만 채움
+    p = r["pins"][0]
+    assert p["label"] == "작성자"
+    assert 0.0 <= p["nx"] <= 1.0 and 0.0 <= p["ny"] <= 1.0   # 셀 중심 좌표 주입
+    assert "grid" in r and r["grid"]["ok"]
+    assert os.path.exists(r["fieldmap_path"])                 # 캐시 저장 승계
+
+
+def test_map_minutes_form_ai_failure_keeps_existing_fieldmap(workdir):
+    """AI 키 없음 등으로 통합 매핑이 실패해도 기존 정상 fieldmap을
+    빈 매핑으로 덮어쓰지 않는다 (scan_minutes_template와 동일한 캐시 보호 규칙)."""
+    from src.ai.minutes_template_mapper import (save_minutes_fieldmap,
+                                                 load_minutes_fieldmap)
+    tpl = _copy_template(workdir, "통합캐시양식.hwpx")
+    good = {"cell_map": {"business_name": [2, 2], "meeting_topic": [3, 1]},
+            "unmapped": []}
+    save_minutes_fieldmap(tpl, good)
+
+    api = _api(workdir)          # AI 키 없음 → map_minutes_form 실패 경로
+    r = api.map_minutes_form(tpl)
+    assert r["ok"] and r.get("ai_error")
+    kept = load_minutes_fieldmap(tpl)
+    assert kept["cell_map"] == {"business_name": [0, 2, 2], "meeting_topic": [0, 3, 1]}
+
+
+def test_map_minutes_form_missing_file(workdir):
+    api = _api(workdir)
+    r = api.map_minutes_form(os.path.join(workdir, "없음.hwpx"))
+    assert not r["ok"]
+
+
 # ── T-B2-1: Preset CRUD + gallery_autoshow ───────────────────────────────────
 
 def test_preset_list_seeds_builtin(workdir):

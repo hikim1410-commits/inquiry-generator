@@ -1259,6 +1259,60 @@ class Api:
         except Exception as e:
             return _err(e, traceback=traceback.format_exc())
 
+    def map_minutes_form(self, template_path: str) -> dict:
+        """양식 AI 통합 분석 — 표준 7슬롯 + 커스텀 라벨 핀을 1회 호출로.
+
+        scan_minutes_template(표준)·auto_label_minutes_form(커스텀)의 통합 대체.
+        fieldmap 캐시 저장·AI 실패 시 기존 정상 캐시 보호 규칙은 종전과 동일.
+        반환: {ok, ai_used, cell_map, unmapped, pins(+nx,ny), warnings,
+               slot_labels, is_standard, grid, fieldmap_path?, ai_error?}
+        """
+        try:
+            from src.scan.hwpx_scan import scan_hwpx_grid
+            from src.ai.minutes_template_mapper import (
+                map_minutes_form as _map_form, save_minutes_fieldmap,
+                load_minutes_fieldmap, is_standard_map, MINUTES_SLOTS)
+            if not os.path.isfile(template_path):
+                return _err(f"파일을 찾을 수 없습니다: {template_path}")
+
+            grid = scan_hwpx_grid(template_path)
+            if not grid.get("ok"):
+                return grid
+
+            provider = cs.get_provider(self.cfg)
+            api_key = cs.get_ai_key(self.cfg, provider)
+            map_r = _map_form(grid["cells"], provider, api_key,
+                              cs.get_ai_model(self.cfg, provider))
+
+            by_cell = {(c.get("table", 0), c["row"], c["col"]): c
+                       for c in grid["cells"]}
+            pins = []
+            for p in map_r.get("pins", []):
+                c = by_cell.get((p["table"], p["row"], p["col"]))
+                pin = dict(p)
+                if c:                                  # 셀 중심 — 프론트 핀 배치용
+                    pin["nx"] = c["nx"] + c["nw"] / 2
+                    pin["ny"] = c["ny"] + c["nh"] / 2
+                pins.append(pin)
+
+            result = {
+                "ok": True, "ai_used": True,
+                "cell_map": map_r.get("cell_map", {}),
+                "unmapped": map_r.get("unmapped", []),
+                "pins": pins,
+                "warnings": map_r.get("warnings", []),
+                "slot_labels": MINUTES_SLOTS,
+                "is_standard": is_standard_map(map_r.get("cell_map", {})),
+                "grid": grid,
+            }
+            if not map_r.get("ok"):
+                result["ai_error"] = map_r.get("error", "")
+            if map_r.get("ok") or not load_minutes_fieldmap(template_path):
+                result["fieldmap_path"] = save_minutes_fieldmap(template_path, map_r)
+            return result
+        except Exception as e:
+            return _err(e, traceback=traceback.format_exc())
+
     def auto_label_minutes_form(self, template_path: str) -> dict:
         """양식의 라벨 칸을 AI로 식별 → 입력 칸에 항목명 핀 자동 생성.
 
