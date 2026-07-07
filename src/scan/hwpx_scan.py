@@ -18,7 +18,7 @@ from typing import Optional
 from xml.etree import ElementTree as ET
 
 # 셀 탐색 로직·네임스페이스는 생성 엔진과 단일 소스 공유 (중복 금지)
-from src.minutes.hwpx_minutes import _HP, _find_cell
+from src.minutes.hwpx_minutes import _HP, _find_cell, _iter_top_tables
 
 _RE_TOTAL = re.compile(r"총\s*(\d+)\s*명")
 _RE_DATE_ISO = re.compile(r"(\d{4})[-.\s년]+(\d{1,2})[-.\s월]+(\d{1,2})")
@@ -240,28 +240,6 @@ def hit_test_cell(cells: list, nx: float, ny: float):
         if c["nx"] <= nx <= c["nx"] + c["nw"] and c["ny"] <= ny <= c["ny"] + c["nh"]:
             return (c.get("table", 0), c["row"], c["col"])
     return None
-
-
-def _iter_top_tables(root) -> list:
-    """문서 흐름의 최상위 표만 반환 (다른 tc 내부의 중첩표는 제외).
-
-    ElementTree는 부모 포인터가 없어 부모맵을 1회 구성해 tbl 조상 유무로 판정.
-    표가 1개 이하면 맵 구성 없이 즉시 반환(내장 단일 표 양식 경로).
-    """
-    all_tbl = root.findall(f".//{_HP}tbl")
-    if len(all_tbl) <= 1:
-        return all_tbl
-    parent = {ch: pa for pa in root.iter() for ch in pa}
-
-    def is_nested(t):
-        cur = parent.get(t)
-        while cur is not None:
-            if cur.tag == f"{_HP}tbl":
-                return True
-            cur = parent.get(cur)
-        return False
-
-    return [t for t in all_tbl if not is_nested(t)]
 
 
 def _extract_table_cells(tbl) -> list:

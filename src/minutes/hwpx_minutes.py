@@ -87,6 +87,28 @@ def _find_cell(tbl, row, col):
     return None
 
 
+def _iter_top_tables(root) -> list:
+    """문서 흐름의 최상위 표만 반환 (다른 tc 내부의 중첩표는 제외).
+
+    ElementTree는 부모 포인터가 없어 부모맵을 1회 구성해 tbl 조상 유무로 판정.
+    표가 1개 이하면 맵 구성 없이 즉시 반환(내장 단일 표 양식 경로).
+    """
+    all_tbl = root.findall(f".//{_HP}tbl")
+    if len(all_tbl) <= 1:
+        return all_tbl
+    parent = {ch: pa for pa in root.iter() for ch in pa}
+
+    def is_nested(t):
+        cur = parent.get(t)
+        while cur is not None:
+            if cur.tag == f"{_HP}tbl":
+                return True
+            cur = parent.get(cur)
+        return False
+
+    return [t for t in all_tbl if not is_nested(t)]
+
+
 def _set_simple_cell_text(tbl, row, col, text):
     """단순 슬롯 텍스트를 셀에 쓴다. 구조가 없으면 방어적으로 생성(A-6-1).
 
