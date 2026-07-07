@@ -32,6 +32,54 @@ MINUTES_SLOTS = {
     "content":       "회의 내용 본문 (섹션·본문이 들어갈 셀)",
 }
 
+
+def _serialize_grid(grid_cells: list) -> str:
+    """표별 헤더 + `(r,c)[+csN][+rsN]: 텍스트` 직렬화 (AI 프롬프트용).
+
+    span 1은 태그 생략(토큰 절약). 병합으로 덮인 좌표는 목록에 아예 없음을
+    프롬프트가 함께 설명한다. 텍스트 120자 절단·⏎ 병합은 scan 단계에서 이미 처리됨.
+    """
+    by_table = {}
+    for c in grid_cells:
+        by_table.setdefault(int(c.get("table", 0)), []).append(c)
+    lines = []
+    for t in sorted(by_table):
+        cells = sorted(by_table[t], key=lambda c: (c["row"], c["col"]))
+        rows = max((c["row"] + c.get("rowspan", 1) for c in cells), default=0)
+        cols = max((c["col"] + c.get("colspan", 1) for c in cells), default=0)
+        lines.append(f"[표{t}] {rows}행×{cols}열")
+        for c in cells:
+            tag = ""
+            if c.get("colspan", 1) > 1:
+                tag += f"+cs{c['colspan']}"
+            if c.get("rowspan", 1) > 1:
+                tag += f"+rs{c['rowspan']}"
+            lines.append(f"  ({c['row']},{c['col']}){tag}: {c.get('text') or '(빈 셀)'}")
+    return "\n".join(lines)
+
+
+def _neighbor_left(cells_in_table: list, cell: dict) -> dict:
+    """cell 왼쪽에 맞닿은 셀(병합 폭 기준, col+colspan == cell.col).
+
+    rowspan 겹침 범위 안에서 탐색. 후보가 정확히 1개일 때만 반환(모호하면 None).
+    같은 table 부분집합을 넘겨야 한다(표 간 좌표 중복 흔함).
+    """
+    r0, r1 = cell["row"], cell["row"] + cell.get("rowspan", 1)
+    cands = [c for c in cells_in_table
+             if c["col"] + c.get("colspan", 1) == cell["col"]
+             and c["row"] < r1 and r0 < c["row"] + c.get("rowspan", 1)]
+    return cands[0] if len(cands) == 1 else None
+
+
+def _neighbor_above(cells_in_table: list, cell: dict) -> dict:
+    """cell 위에 맞닿은 셀(row+rowspan == cell.row). 규칙은 _neighbor_left와 대칭."""
+    c0, c1 = cell["col"], cell["col"] + cell.get("colspan", 1)
+    cands = [c for c in cells_in_table
+             if c["row"] + c.get("rowspan", 1) == cell["row"]
+             and c["col"] < c1 and c0 < c["col"] + c.get("colspan", 1)]
+    return cands[0] if len(cands) == 1 else None
+
+
 _PROMPT_TMPL = """당신은 한글(HWPX) 회의록 표 양식 분석가입니다.
 
 아래는 회의록 양식 표의 모든 셀입니다. 각 셀은 (행,열): 텍스트 형식이며,

@@ -195,3 +195,39 @@ def test_is_standard_map_2elem_and_3elem():
     assert is_standard_map(std2) is True     # 기존 v1/v2 파일 형태
     assert is_standard_map(std3) is True     # v3 형태
     assert is_standard_map({**std3, "content": [1, 6, 1]}) is False  # 표1이면 비표준
+
+
+# ── T6: 그리드 직렬화 + 병합 인접성 순수 함수 ──────────────────────────────────
+
+def _cell(t, r, c, text="", cs=1, rs=1):
+    return {"table": t, "row": r, "col": c, "text": text,
+            "colspan": cs, "rowspan": rs}
+
+
+def test_serialize_grid_merge_tags():
+    from src.ai.minutes_template_mapper import _serialize_grid
+    s = _serialize_grid([_cell(0, 0, 0, "회 의 록", cs=3),
+                         _cell(0, 1, 0, "사업명"), _cell(0, 1, 1, "", cs=2)])
+    assert "[표0]" in s
+    assert "(0,0)+cs3: 회 의 록" in s
+    assert "(1,0): 사업명" in s            # span 1은 태그 생략
+    assert "(1,1)+cs2: (빈 셀)" in s
+
+
+def test_neighbor_left_respects_colspan():
+    from src.ai.minutes_template_mapper import _neighbor_left
+    cells = [_cell(0, 2, 0, "성명", cs=2), _cell(0, 2, 2, "")]
+    assert _neighbor_left(cells, cells[1])["text"] == "성명"   # col+colspan == 2
+
+
+def test_neighbor_above_respects_rowspan():
+    from src.ai.minutes_template_mapper import _neighbor_above
+    cells = [_cell(0, 1, 0, "비고", rs=2), _cell(0, 3, 0, "")]
+    assert _neighbor_above(cells, cells[1])["text"] == "비고"  # row+rowspan == 3
+
+
+def test_neighbor_left_none_when_ambiguous():
+    from src.ai.minutes_template_mapper import _neighbor_left
+    cells = [_cell(0, 0, 0, "a"), _cell(0, 1, 0, "b"),
+             _cell(0, 0, 1, "", rs=2)]                          # 왼쪽 이웃 2개(모호)
+    assert _neighbor_left(cells, cells[2]) is None
