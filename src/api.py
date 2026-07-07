@@ -1275,8 +1275,9 @@ class Api:
 
     def save_minutes_cellmap(self, template_path: str, cell_map: dict = None,
                              custom_slots=None, annotations=None) -> dict:
-        """사용자 편집본(cell_map + custom_slots + annotations)을 fieldmap v2로 저장.
+        """사용자 편집본(cell_map + custom_slots + annotations)을 fieldmap v3로 저장.
 
+        좌표는 항상 [table,row,col] 3요소로 정규화 저장(2요소 입력은 표0 승격).
         반환: {ok, path, cell_map, custom_slots, annotations, unmapped,
                is_standard, warnings}
         """
