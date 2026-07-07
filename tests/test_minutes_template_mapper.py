@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""T-A2-1 / T-A3-1: fieldmap v2 저장(save_minutes_cellmap) + 스키마 검증.
+"""T-A2-1 / T-A3-1: fieldmap 저장(save_minutes_cellmap, v3) + 스키마 검증.
 
 COM·AI·네트워크 불필요 — 기본 pytest로 실행.
 """
+import json
 import os
 
 import pytest
@@ -73,45 +74,54 @@ def test_save_cellmap_roundtrip(tpl):
     custom = [{"id": "cs1", "label": "부서", "cell": [1, 2]}]
     anns = [{"row": 4, "col": 1, "label": "검토", "comment": "확인필요", "slot": "content"}]
     res = save_minutes_cellmap(tpl, cell_map, custom, anns)
-    assert res["version"] == 2
+    assert res["version"] == 3
     fm = load_minutes_fieldmap(tpl)
-    assert fm["version"] == 2
-    assert fm["cell_map"] == {"business_name": [2, 2], "meeting_topic": [3, 1]}
-    assert fm["custom_slots"] == custom
+    assert fm["version"] == 3
+    # v3: cell_map·custom_slots.cell 은 항상 [table,row,col] 3요소(표0 승격 저장)
+    assert fm["cell_map"] == {"business_name": [0, 2, 2], "meeting_topic": [0, 3, 1]}
+    assert fm["custom_slots"] == [{"id": "cs1", "label": "부서", "cell": [0, 1, 2]}]
     # table 기본 0 부여(다중 표 후방호환) — 입력에 table 없어도 정규화본엔 포함
     assert fm["annotations"] == [{"table": 0, **anns[0]}]
 
 
 def test_save_cellmap_is_standard_recalc(tpl):
-    # DEFAULT_CELLS는 (table,row,col) 3-tuple(T3)이지만 save_minutes_cellmap의
-    # cell_map 저장 포맷은 아직 v2([row,col] 2요소, 표0 전제 — 3요소화는 T5에서).
-    # 여기서는 표0 좌표(row,col)만 뽑아 표준 좌표를 구성한다.
-    standard = {k: [v[1], v[2]] for k, v in DEFAULT_CELLS.items()}
+    # DEFAULT_CELLS는 (table,row,col) 3-tuple(T3) — v3부터는 cell_map 저장도
+    # 항상 3요소이므로 그대로 표준 좌표로 사용한다.
+    standard = {k: list(v) for k, v in DEFAULT_CELLS.items()}
     res = save_minutes_cellmap(tpl, standard)
     assert res["is_standard"] is True
-    res2 = save_minutes_cellmap(tpl, {"business_name": [9, 9]})
-    assert res2["is_standard"] is False
+    # 2요소([row,col], 표0 생략) 입력도 _norm_cell_map이 표0으로 승격하므로
+    # 여전히 표준으로 인식되어야 한다(is_standard_map 2/3요소 겸용).
+    standard_2elem = {k: [v[1], v[2]] for k, v in DEFAULT_CELLS.items()}
+    res2 = save_minutes_cellmap(tpl, standard_2elem)
+    assert res2["is_standard"] is True
+    res3 = save_minutes_cellmap(tpl, {"business_name": [9, 9]})
+    assert res3["is_standard"] is False
 
 
 def test_save_cellmap_drops_unknown_slot(tpl):
     res = save_minutes_cellmap(tpl, {"bogus_slot": [1, 1], "content": [6, 1]})
     assert "bogus_slot" not in res["cell_map"]
-    assert res["cell_map"]["content"] == [6, 1]
+    assert res["cell_map"]["content"] == [0, 6, 1]
     assert "content" not in res["unmapped"]
     assert "business_name" in res["unmapped"]
 
 
-# ── 후방호환: v1 → load → v2 저장 ─────────────────────────────────────────────
+# ── 후방호환: v1 → load → v3 저장 ─────────────────────────────────────────────
 
 def test_load_v1_without_custom_slots(tpl):
-    save_minutes_fieldmap(tpl, {"cell_map": {"business_name": [1, 1]},
-                                "unmapped": ["content"]})
+    # save_minutes_fieldmap은 이제 항상 v3(3요소)로 저장하므로, 과거 앱 버전이
+    # 남긴 실제 v1 파일(2요소·custom_slots 없음)은 직접 재현해 후방호환을 검증한다.
+    path = mtm._fieldmap_path(tpl)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "cell_map": {"business_name": [1, 1]},
+                   "unmapped": ["content"]}, f)
     fm = load_minutes_fieldmap(tpl)
     assert fm.get("version") == 1
-    assert "custom_slots" not in fm        # v1엔 없음 — 견고 로드
-    # v2로 다시 저장해도 기존 cell_map 보존
+    assert "custom_slots" not in fm        # v1엔 없음 — 견고 로드(무변환 통과)
+    # v3로 다시 저장하면 2요소 cell_map이 표0 승격되어 3요소로 정규화된다
     res = save_minutes_cellmap(tpl, fm["cell_map"])
-    assert res["cell_map"] == {"business_name": [1, 1]}
+    assert res["cell_map"] == {"business_name": [0, 1, 1]}
     assert res["custom_slots"] == []
     assert res["annotations"] == []
 
@@ -141,7 +151,7 @@ def test_custom_slots_invalid_items_ignored(tpl):
     ]
     res = save_minutes_cellmap(tpl, {}, custom, None)
     assert [s["id"] for s in res["custom_slots"]] == ["ok1"]
-    assert res["custom_slots"][0]["cell"] == [1, 2]
+    assert res["custom_slots"][0]["cell"] == [0, 1, 2]   # 2요소 → 표0 승격
     assert len(res["warnings"]) >= 4
 
 
@@ -153,6 +163,25 @@ def test_annotations_bad_coords_ignored(tpl):
     ]
     res = save_minutes_cellmap(tpl, {}, None, anns)
     assert [(a["row"], a["col"]) for a in res["annotations"]] == [(6, 1)]
+
+
+# ── T5: fieldmap v3 저장 경로 — 좌표 항상 [table,row,col] 3요소 ──────────────
+
+def test_save_cellmap_v3_roundtrip(tmp_path):
+    from src.ai.minutes_template_mapper import save_minutes_cellmap, load_minutes_fieldmap
+    tpl = str(tmp_path / "t.hwpx"); open(tpl, "w").close()
+    r = save_minutes_cellmap(tpl,
+        cell_map={"business_name": [1, 1], "meeting_date": [1, 2, 1]},   # 2+3 혼합 입력
+        custom_slots=[{"id": "c3_0", "label": "부서", "cell": [3, 0]},
+                      {"id": "c1_2_0", "label": "작성자", "cell": [1, 2, 0]}],
+        annotations=[])
+    fm = load_minutes_fieldmap(tpl)
+    assert fm["version"] == 3
+    assert fm["cell_map"]["business_name"] == [0, 1, 1]      # 2요소 → 표0 승격 저장
+    assert fm["cell_map"]["meeting_date"] == [1, 2, 1]
+    cells = {s["id"]: s["cell"] for s in fm["custom_slots"]}
+    assert cells["c3_0"] == [0, 3, 0]
+    assert cells["c1_2_0"] == [1, 2, 0]
 
 
 # ── T3: 좌표 3요소화 — is_standard_map 2/3요소 판정 ──────────────────────────

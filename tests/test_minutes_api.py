@@ -201,7 +201,9 @@ def test_scan_minutes_template_ai_failure_keeps_existing_fieldmap(workdir):
     r = api.scan_minutes_template(tpl)
     assert r["ok"] and r.get("ai_error")
     kept = load_minutes_fieldmap(tpl)
-    assert kept["cell_map"] == good["cell_map"]   # 기존 매핑 보존
+    # save_minutes_fieldmap은 v3 저장 시 표0 승격([table,row,col])하므로
+    # 원본 2요소 입력과 비교하려면 동일하게 승격한 형태로 대조한다.
+    assert kept["cell_map"] == {"business_name": [0, 2, 2], "meeting_topic": [0, 3, 1]}
 
 
 def test_scan_minutes_template_first_scan_caches_even_on_ai_failure(workdir):
@@ -258,9 +260,9 @@ def test_save_minutes_cellmap_api_roundtrip(workdir):
     r = api.save_minutes_cellmap(tpl, cell_map, custom, anns)
     assert r["ok"], r.get("error")
     fm = load_minutes_fieldmap(tpl)
-    assert fm["version"] == 2
-    assert fm["cell_map"] == {"business_name": [2, 2]}
-    assert fm["custom_slots"] == custom
+    assert fm["version"] == 3
+    assert fm["cell_map"] == {"business_name": [0, 2, 2]}
+    assert fm["custom_slots"] == [{"id": "dept", "label": "부서", "cell": [0, 1, 2]}]
     assert fm["annotations"] == [{"table": 0, **anns[0]}]   # table 기본 0 부여
 
 
@@ -398,9 +400,9 @@ def test_load_minutes_cellmap_roundtrip(workdir):
     r = api.load_minutes_cellmap(tpl)
     assert r["ok"], r.get("error")
     assert r["has_fieldmap"] is True
-    assert r["version"] == 2
-    assert r["cell_map"] == {"business_name": [2, 2]}
-    assert r["custom_slots"] == custom
+    assert r["version"] == 3
+    assert r["cell_map"] == {"business_name": [0, 2, 2]}
+    assert r["custom_slots"] == [{"id": "dept", "label": "부서", "cell": [0, 1, 2]}]
     assert r["annotations"] == [{"table": 0, **anns[0]}]   # table 기본 0 부여
 
 

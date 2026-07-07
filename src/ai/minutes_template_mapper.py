@@ -6,12 +6,12 @@
 AI에 주고, 각 표준 슬롯의 값이 들어갈 셀(row,col)을 받는다.
 결과는 템플릿 옆 .minutes.fieldmap.json 으로 캐시되며 build_minutes(cell_map=)로 전달된다.
 
-minutes.fieldmap.json 구조:
+minutes.fieldmap.json 구조 (v3):
   {
-    "version": 1,
+    "version": 3,
     "template": "파일명.hwpx",
     "is_standard": false,         # DEFAULT_CELLS 와 동일하면 true
-    "cell_map": {"business_name": [1,1], "meeting_date": [2,1], ...},
+    "cell_map": {"business_name": [0,1,1], "meeting_date": [0,2,1], ...},  # [table,row,col]
     "unmapped": ["content"]       # 셀을 못 찾은 슬롯
   }
 """
@@ -204,11 +204,16 @@ def load_minutes_fieldmap(template_path: str) -> dict:
 
 
 def save_minutes_fieldmap(template_path: str, map_result: dict) -> str:
-    """AI 매핑 결과를 .minutes.fieldmap.json 으로 저장."""
+    """AI 매핑 결과를 .minutes.fieldmap.json 으로 저장 (v3, 좌표 [table,row,col]).
+
+    map_result["cell_map"]은 legacy map_minutes_cells([행,열] 2요소)와
+    map_minutes_form([표,행,열] 3요소, 다중 표) 양쪽에서 올 수 있어
+    _norm_cell_map으로 항상 3요소로 정규화한 뒤 저장한다.
+    """
     path = _fieldmap_path(template_path)
-    cell_map = map_result.get("cell_map", {})
+    cell_map = _norm_cell_map(map_result.get("cell_map", {}))
     data = {
-        "version": 1,
+        "version": 3,
         "template": os.path.basename(template_path),
         "is_standard": is_standard_map(cell_map),
         "cell_map": cell_map,
@@ -219,25 +224,34 @@ def save_minutes_fieldmap(template_path: str, map_result: dict) -> str:
     return path
 
 
-# ── fieldmap v2: 사용자 편집본 저장 (cell_map + custom_slots + annotations) ────
+# ── fieldmap v3: 사용자 편집본 저장 (cell_map + custom_slots + annotations, 좌표 항상 [table,row,col]) ────
 
 def _norm_cell_map(cell_map: dict) -> dict:
-    """cell_map(JSON 유래)에서 표준 7슬롯·[정수,정수]만 수용해 정규화."""
+    """cell_map(JSON 유래)에서 표준 7슬롯만 수용, 항상 [table,row,col] 3요소로 정규화.
+
+    2요소([행,열]) 입력은 table=0으로 승격(단일 표 전제의 구버전 호환), 3요소는
+    그대로 정수화. 그 외 형태(길이 0/1 등)는 무시.
+    """
     out = {}
     for slot, rc in (cell_map or {}).items():
         if slot not in MINUTES_SLOTS:
             continue
         try:
-            out[slot] = [int(rc[0]), int(rc[1])]
+            if len(rc) >= 3:
+                out[slot] = [int(rc[0]), int(rc[1]), int(rc[2])]
+            else:
+                out[slot] = [0, int(rc[0]), int(rc[1])]
         except (TypeError, ValueError, IndexError):
             continue
     return out
 
 
 def _validate_custom_slots(custom_slots) -> tuple:
-    """custom_slots [{id, label, cell:[r,c]}] 검증. (정규화 리스트, 경고) 반환.
+    """custom_slots [{id, label, cell:[table,row,col] 또는 [row,col]}] 검증.
 
-    잘못된 항목(누락 id·라벨 비문자열·정수쌍 아님)은 무시하고 경고에 담는다.
+    (정규화 리스트, 경고) 반환. cell은 항상 [table,row,col] 3요소로 정규화해
+    담는다(2요소 입력은 table=0 승격).
+    잘못된 항목(누락 id·라벨 비문자열·좌표 형식 오류)은 무시하고 경고에 담는다.
     id 중복도 거부(첫 항목만 유지) — 생성 시 custom_fields[id] 충돌 방지.
     """
     out, warnings, seen_ids = [], [], set()
@@ -255,7 +269,10 @@ def _validate_custom_slots(custom_slots) -> tuple:
             warnings.append(f"custom_slot '{sid}' 라벨 타입 오류 — 무시")
             continue
         try:
-            r, c = int(cell[0]), int(cell[1])
+            if len(cell) >= 3:
+                t, r, c = int(cell[0]), int(cell[1]), int(cell[2])
+            else:
+                t, r, c = 0, int(cell[0]), int(cell[1])
         except (TypeError, ValueError, IndexError, KeyError):
             warnings.append(f"custom_slot '{sid}' 셀 좌표 오류 — 무시")
             continue
@@ -263,7 +280,7 @@ def _validate_custom_slots(custom_slots) -> tuple:
             warnings.append(f"custom_slot id '{sid}' 중복 — 무시")
             continue
         seen_ids.add(sid)
-        out.append({"id": sid, "label": label, "cell": [r, c]})
+        out.append({"id": sid, "label": label, "cell": [t, r, c]})
     return out, warnings
 
 
@@ -315,12 +332,13 @@ def _validate_annotations(annotations) -> tuple:
 
 def save_minutes_cellmap(template_path: str, cell_map: dict,
                          custom_slots=None, annotations=None) -> dict:
-    """사용자 편집본을 .minutes.fieldmap.json version 2로 저장.
+    """사용자 편집본을 .minutes.fieldmap.json version 3로 저장.
 
-    구조: {version:2, template, is_standard, cell_map, unmapped,
+    구조: {version:3, template, is_standard, cell_map, unmapped,
            custom_slots, annotations}
-    is_standard 는 cell_map 으로 재계산. 잘못된 custom_slots/annotations 항목은
-    무시하고 warnings 로 보고(저장은 진행).
+    cell_map 값·custom_slots[].cell 은 항상 [table,row,col] 3요소로 정규화되어
+    저장된다(2요소 입력은 table=0 승격). is_standard 는 cell_map 으로 재계산.
+    잘못된 custom_slots/annotations 항목은 무시하고 warnings 로 보고(저장은 진행).
 
     반환: 저장한 fieldmap dict + {"path", "warnings"}.
     """
@@ -329,7 +347,7 @@ def save_minutes_cellmap(template_path: str, cell_map: dict,
     anns, ann_warn = _validate_annotations(annotations)
 
     data = {
-        "version": 2,
+        "version": 3,
         "template": os.path.basename(template_path),
         "is_standard": is_standard_map(cells),
         "cell_map": cells,
