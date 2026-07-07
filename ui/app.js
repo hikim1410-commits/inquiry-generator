@@ -1951,7 +1951,9 @@ function normCellMap(m) {
   const o = {};
   for (const k in (m || {})) {
     const v = m[k];
-    if (Array.isArray(v) && v.length >= 2) o[k] = [+v[0], +v[1]];
+    if (!Array.isArray(v) || v.length < 2) continue;
+    // 3요소 [table,row,col] 보존, 2요소(구버전 fieldmap)는 표0으로 승격
+    o[k] = v.length >= 3 ? [+v[0], +v[1], +v[2]] : [0, +v[0], +v[1]];
   }
   return o;
 }
@@ -2113,28 +2115,27 @@ function mnPinPos(a) {   // 핀 정규화 위치 — 없으면 셀 중심으로 
   const c = mnEditor.grid.find(g => g.table === mnT(a) && g.row === a.row && g.col === a.col);
   return c ? [c.nx + c.nw / 2, c.ny + c.nh / 2] : [0, 0];
 }
-function mnDeriveCellMap() {   // 표준 슬롯이 지정된 핀(표 0만) → cell_map (생성 엔진 입력)
-  const m = {};                // 다중 표는 annotations 중심 — cell_map은 단일 표(table 0)만
+function mnDeriveCellMap() {   // 표준 슬롯 핀(모든 표) → cell_map [table,row,col]
+  const m = {};
   mnEditor.annotations.forEach(a => {
-    if (mnT(a) === 0 && a.slot && MN_SLOT_LABELS[a.slot]) m[a.slot] = [a.row, a.col];
+    if (a.slot && MN_SLOT_LABELS[a.slot]) m[a.slot] = [mnT(a), a.row, a.col];
   });
   return m;
 }
-/* ponytail: build_minutes의 cell_map·custom_slots는 첫 표(표 0)만 지원 — 표>0 핀(표준·커스텀
-   모두)은 생성물에 미반영. 엔진이 [table,row,col] 좌표를 받게 되면 이 경고와 위 표 0 필터를 함께 제거. */
-function mnPinsOffTable0() {
-  return mnEditor.annotations
-    .filter(a => mnT(a) !== 0 && ((a.slot && MN_SLOT_LABELS[a.slot]) || (a.label && a.label.trim())))
-    .map(a => mnItemLabel(a));
-}
 
-/* 커스텀 라벨 핀(표 0, 슬롯 없음, 라벨 있음) → custom_slots [{id,label,cell}] 도출.
+/* 커스텀 라벨 핀(슬롯 없음, 라벨 있음) → custom_slots [{id,label,cell:[t,r,c]}].
    순수함수(mnEditor 전역이 아니라 annotations 배열을 인자로 받음) — 왕복 테스트 용이.
-   id는 좌표 기반("c행_열")이라 라벨을 바꿔도 안정적 — 재편집 시 custom_fields 값이 유지된다. */
+   id는 좌표 기반이라 라벨을 바꿔도 안정적 — 재편집 시 custom_fields 값이 유지된다.
+   표0은 기존 "c행_열" 형식 유지(저장된 재편집 데이터와의 연결 보존),
+   표1+만 "c표_행_열" — 두 형식은 충돌하지 않는다. */
 function mnDeriveCustomSlots(annotations) {
   return (annotations || [])
-    .filter(a => (a.table || 0) === 0 && !a.slot && a.label && a.label.trim())
-    .map(a => ({ id: `c${a.row}_${a.col}`, label: a.label.trim(), cell: [a.row, a.col] }));
+    .filter(a => !a.slot && a.label && a.label.trim())
+    .map(a => {
+      const t = (a.table || 0);
+      const id = t === 0 ? `c${a.row}_${a.col}` : `c${t}_${a.row}_${a.col}`;
+      return { id, label: a.label.trim(), cell: [t, a.row, a.col] };
+    });
 }
 
 async function openMinutesMapEditor(templatePath, name) {
@@ -2194,13 +2195,15 @@ async function openMinutesMapEditor(templatePath, name) {
   $('#mn-map-modal').classList.remove('hidden');
 }
 
-/* cell_map(slot→[r,c]) → 핀 배열(셀 중심에 표준 슬롯 핀) — AI/표준은 항상 표 0 */
+/* cell_map(slot→[t,r,c]) → 핀 배열(셀 중심에 표준 슬롯 핀) — 모든 표 지원 */
 function mnCellMapToAnns(cellMap) {
   const out = [];
-  Object.entries(cellMap || {}).forEach(([slot, rc]) => {
-    if (!MN_SLOT_LABELS[slot]) return;
-    out.push({ table: 0, row: rc[0], col: rc[1], slot, label: MN_SLOT_LABELS[slot], comment: '' });
-  });
+  for (const slot in (cellMap || {})) {
+    const rc = cellMap[slot];                 // normCellMap 통과 후 항상 [t,r,c]
+    if (!MN_SLOT_LABELS[slot] || !Array.isArray(rc) || rc.length < 3) continue;
+    out.push({ table: rc[0], row: rc[1], col: rc[2],
+               slot, label: MN_SLOT_LABELS[slot], comment: '' });
+  }
   return out;
 }
 
@@ -2334,7 +2337,6 @@ function savePinPop() {
   if (sel && sel !== '__custom__') {                 // 표준 슬롯 — 슬롯당 1셀 보장
     mnEditor.annotations.forEach(x => { if (x !== a && x.slot === sel) delete x.slot; });
     a.slot = sel; a.label = MN_SLOT_LABELS[sel];
-    if (t !== 0) toast(`표${t + 1}의 '${MN_SLOT_LABELS[sel]}' — 표준 항목은 첫 번째 표만 생성에 반영됩니다`, 'warn', 6000);
   } else if (sel === '__custom__') {                 // 커스텀 라벨
     if (!customLabel) { toast('커스텀 라벨을 입력하세요', 'warn'); return; }
     delete a.slot; a.label = customLabel;
@@ -2456,8 +2458,6 @@ async function saveMinutesMapping() {
   const r = await call('save_minutes_cellmap', tpl, mnDeriveCellMap(), customSlots, mnEditor.annotations);
   overlay(false);
   if (!r.ok) { toast(r.error || '매핑 저장 실패', 'err', 5000); return; }
-  const off = mnPinsOffTable0();   // AI/구버전 매핑 유입분 포함 — 저장 시에도 유실 가시화
-  if (off.length) toast(`${off.join(', ')} — 첫 번째 표 밖이라 생성 시 반영되지 않습니다`, 'warn', 6000);
   mnEditor.annotations = r.annotations || [];   // 백엔드 정규화본(1셀1핀·nx,ny 보존)
   mnEditor.cache[tpl] = { annotations: clone(mnEditor.annotations) };
   const unmapped = (r.unmapped || []).map(s => MN_SLOT_LABELS[s] || s);
