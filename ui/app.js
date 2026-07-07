@@ -1454,45 +1454,7 @@ async function pickMinutesTemplate() {
   $('#mn-tpl-name').textContent = r.path.split(/[/\\]/).pop();
   $('#mn-tpl-status').textContent = '커스텀 양식 적용됨 — [매핑 편집]으로 항목을 매핑하세요.';
   $('#btn-scan-mn-tpl').disabled = false;
-  $('#mn-tpl-scan-result').classList.add('hidden');
   toast('회의록 양식이 변경됐습니다', 'ok');
-}
-
-async function scanMinutesTemplate() {
-  if (!_mnTplPath) return;
-  $('#btn-scan-mn-tpl').disabled = true;
-  $('#mn-tpl-status').textContent = '분석 중… (AI가 표 구조를 해석)';
-  $('#mn-tpl-scan-result').classList.add('hidden');
-
-  const r = await call('scan_minutes_template', _mnTplPath);
-  if (!r.ok) {
-    $('#mn-tpl-status').textContent = `오류: ${r.error}`;
-    $('#btn-scan-mn-tpl').disabled = false;
-    return;
-  }
-
-  const cellMap = r.cell_map || {};
-  const mapped = Object.keys(cellMap).length;
-  const unmapped = (r.unmapped || []);
-  let msg = r.is_standard ? '표준 구조 확인 ✓' : `AI 매핑 ${mapped}개 셀 완료`;
-  if (r.ai_error) msg += ` (AI 오류: ${r.ai_error})`;
-  if (unmapped.length) msg += `, 미매핑 ${unmapped.length}개`;
-  $('#mn-tpl-status').textContent = msg;
-
-  const labels = r.slot_labels || {};
-  const tbody = $('#mn-tpl-map-body');
-  tbody.innerHTML = '';
-  for (const [slot, rc] of Object.entries(cellMap)) {
-    const label = (labels[slot] || slot).split(' (')[0];
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(label)}</td><td><code>(${rc[0]}, ${rc[1]})</code></td>`;
-    tbody.appendChild(tr);
-  }
-  $('#mn-tpl-unmapped').textContent = unmapped.length
-    ? `미매핑 항목: ${unmapped.map(s => (labels[s] || s).split(' (')[0]).join(', ')}` : '';
-  $('#mn-tpl-scan-result').classList.toggle('hidden', mapped === 0);
-  $('#btn-scan-mn-tpl').disabled = false;
-  toast('회의록 양식 분석·적용 완료', 'ok');
 }
 
 async function resetMinutesTemplate() {
@@ -1500,7 +1462,6 @@ async function resetMinutesTemplate() {
   if (!r.ok) { toast(r.error || '복원 실패', 'err'); return; }
   _mnTplPath = null;
   $('#btn-scan-mn-tpl').disabled = true;
-  $('#mn-tpl-scan-result').classList.add('hidden');
   initMinutesTemplateStatus();
   toast('기본 내장 양식으로 복원됐습니다', 'ok');
 }
@@ -2184,13 +2145,13 @@ async function openMinutesMapEditor(templatePath, name) {
   $('#mn-pin-pop').classList.add('hidden');
   const warn = $('#mn-map-warn'); warn.className = 'ai-status'; warn.textContent = '';
   mnBuildSlotOptions();
-  // 항목 자동 인식 버튼 — AI 키 없으면 비활성+안내
-  const auto = $('#mn-map-autolabel');
+  // AI 자동 매핑 버튼 — AI 키 없으면 비활성+안내
+  const auto = $('#mn-map-ai');
   const hasKey = aiKeySet();
   auto.disabled = !hasKey;
   auto.title = hasKey
-    ? '이미 추출된 셀 라벨을 AI가 분석해 입력 칸에 항목 핀을 자동 생성합니다'
-    : 'AI 키가 없습니다 — 설정에서 키를 입력하면 자동 인식을 쓸 수 있습니다';
+    ? '양식의 표준 7항목(사업명·일시 등)과 그 외 라벨 칸을 AI로 한 번에 찾아 핀을 배치합니다'
+    : 'AI 키가 없습니다 — 설정에서 키를 입력하면 자동 매핑을 쓸 수 있습니다';
   renderMapCanvas(); renderSlotStatus();
   $('#mn-map-modal').classList.remove('hidden');
 }
@@ -2417,22 +2378,27 @@ function renderSlotStatus() {
   box.innerHTML = fixedRow + rows;
 }
 
-/* 편집기 내 [AI 자동 매핑] — 언제든 재호출 가능. 표준 슬롯 핀만 AI 결과로 갱신하고
-   커스텀 라벨 핀은 보존한다(1셀=1핀이라 같은 셀에 AI가 다른 슬롯을 제안하면 덮어씀). */
+/* [AI 자동 매핑] — 표준 7슬롯 + 커스텀 라벨을 1회 호출로 배치.
+   병합 정책: AI가 이번에 제안한 정확한 (table,row,col)만 교체, 그 외 기존 핀
+   (수동 다듬은 커스텀 포함)은 전부 보존. */
 async function runMinutesAiAutoMap() {
   if (!aiKeySet()) { toast('AI 자동 매핑을 쓰려면 설정에서 AI API 키를 먼저 등록하세요', 'warn', 5000); return; }
   const tpl = mnEditor.templatePath;
   if (!tpl) return;
   overlay(true, 'AI가 양식을 분석하는 중...');
-  const r = await call('scan_minutes_template', tpl);
+  const r = await call('map_minutes_form', tpl);
   overlay(false);
   if (!r.ok) { toast(r.error || 'AI 자동 매핑 실패', 'err', 5000); return; }
 
-  const aiAnns = mnCellMapToAnns(normCellMap(r.cell_map));
-  // 키에 table 포함 — row,col만 쓰면 표1+의 커스텀 핀이 표0 AI 슬롯과 좌표가
-  // 같을 때 오삭제된다(AI 슬롯은 전부 표0).
+  const stdAnns = mnCellMapToAnns(normCellMap(r.cell_map));
+  const pinAnns = (r.pins || []).map(p => ({
+    table: p.table || 0, row: p.row, col: p.col,
+    label: p.label, comment: '', nx: p.nx, ny: p.ny,
+  }));
+  const aiAnns = stdAnns.concat(pinAnns)
+    .sort((a, b) => mnT(a) - mnT(b) || a.row - b.row || a.col - b.col);
   const aiCells = new Set(aiAnns.map(a => mnT(a) + ',' + a.row + ',' + a.col));
-  // 기존 핀 중 AI가 새로 지정한 셀과 겹치는 것만 제거, 나머지(커스텀 라벨 등)는 보존
+  // AI가 이번에 지정한 셀의 기존 핀만 제거 — 나머지는 전부 보존
   mnEditor.annotations = mnEditor.annotations.filter(a => !aiCells.has(mnT(a) + ',' + a.row + ',' + a.col));
   aiAnns.forEach(a => {
     const [nx, ny] = mnPinPos(a);
@@ -2441,11 +2407,13 @@ async function runMinutesAiAutoMap() {
   renderMapCanvas(); renderSlotStatus();
 
   const unmapped = (r.unmapped || []).map(s => MN_SLOT_LABELS[s] || s);
-  let msg = `AI 매핑 ${aiAnns.length}개 완료`;
+  const warns = r.warnings || [];
+  let msg = `AI 매핑 완료 — 표준 ${stdAnns.length}개, 커스텀 ${pinAnns.length}개`;
   if (unmapped.length) msg += ` · 미매핑 ${unmapped.length}개 (${unmapped.join(', ')})`;
+  if (warns.length) msg += '\n' + warns.join('\n');
   if (r.ai_error) msg += `\n${r.ai_error}`;
   const box = $('#mn-map-warn');
-  box.className = 'ai-status show' + (unmapped.length || r.ai_error ? ' warn' : '');
+  box.className = 'ai-status show' + (unmapped.length || warns.length || r.ai_error ? ' warn' : '');
   box.textContent = msg;
   toast('AI 자동 매핑 완료 — 결과를 확인하고 필요하면 직접 수정하세요', 'ok');
 }
@@ -2470,39 +2438,6 @@ async function saveMinutesMapping() {
   box.textContent = msg;
   toast('매핑이 저장됐습니다', 'ok');
   renderMapCanvas(); renderSlotStatus();
-}
-
-/* 항목 자동 인식 — AI가 라벨 칸을 분석해 입력 칸에 항목 핀 자동 생성.
-   기존 핀이 있는 셀은 건너뛰고 빈 셀에만 추가(1셀=1핀). */
-async function autoLabelMinutesForm() {
-  const tpl = mnEditor.templatePath;
-  if (!tpl) return;
-  if (!aiKeySet()) {
-    toast('AI 키가 없어 자동 인식을 쓸 수 없습니다 (설정에서 키 입력)', 'warn', 5000);
-    return;
-  }
-  overlay(true, '항목 자동 인식 중...');
-  const r = await call('auto_label_minutes_form', tpl);
-  overlay(false);
-  if (!r.ok) { toast(r.error || '항목 자동 인식 실패', 'err', 5000); return; }
-  let added = 0, skipped = 0;
-  (r.pins || []).forEach(p => {
-    const t = p.table || 0;
-    if (mnFindAnn(t, p.row, p.col)) { skipped++; return; }   // 기존 핀 셀 건너뜀
-    mnEditor.annotations.push({
-      table: t, row: p.row, col: p.col,
-      label: p.label, comment: '', nx: p.nx, ny: p.ny,
-    });
-    added++;
-  });
-  renderMapCanvas(); renderSlotStatus();
-  if (added) {
-    let msg = `${added}개 항목을 자동 인식했습니다`;
-    if (skipped) msg += ` (기존 핀 ${skipped}개 유지)`;
-    toast(msg + ' — 확인 후 매핑 저장하세요', 'ok', 5000);
-  } else {
-    toast('자동 인식된 새 항목이 없습니다', 'warn');
-  }
 }
 
 /* ===================================================================
@@ -2702,7 +2637,6 @@ async function init() {
   $('#mn-map-cancel').addEventListener('click', () => $('#mn-map-modal').classList.add('hidden'));
   $('#mn-map-save').addEventListener('click', saveMinutesMapping);
   $('#mn-map-ai').addEventListener('click', runMinutesAiAutoMap);
-  $('#mn-map-autolabel').addEventListener('click', autoLabelMinutesForm);
   $('#mn-map-canvas').addEventListener('click', onCanvasClick);
   $('#mn-pop-slot').addEventListener('change', mnTogglePopCustom);
   $('#mn-pop-save').addEventListener('click', savePinPop);

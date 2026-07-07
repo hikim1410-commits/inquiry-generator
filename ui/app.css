@@ -335,8 +335,6 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;
 .modal label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink2)}
 .modal textarea{resize:vertical}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
-.modal-actions .mn-map-autolabel{margin-right:auto}
-.modal-actions .mn-map-autolabel:disabled{opacity:.5;cursor:not-allowed}
 
 /* AI 모달 2단계 */
 .ai-status{display:none}
