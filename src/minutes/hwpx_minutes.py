@@ -322,17 +322,23 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
         tree = ET.parse(xml_path)
         root = tree.getroot()
 
-        tbl = root.find(f'.//{_HP}tbl')
-        if tbl is None:
+        tables = _iter_top_tables(root)
+        if not tables:
             return {"ok": False, "error": "양식 표를 찾을 수 없습니다."}
 
+        def _resolve(slot_cells):
+            """(table,row,col) → (표 엘리먼트|None, row, col). 범위 밖 표는 경고+건너뜀."""
+            t, r, c = slot_cells
+            if 0 <= t < len(tables):
+                return tables[t], r, c
+            warnings.append(f"표 {t + 1} 없음(양식에 표 {len(tables)}개) — 해당 항목 건너뜀")
+            return None, r, c
+
         # 2) 단순 셀 (사업명/일시/장소/주제) — 기존 run 스타일 보존
-        # cells[slot]은 (table,row,col) 3-tuple(T3) — 표0 전제 임시 어댑터로 r,c만 사용.
-        # (다중 표 정식 지원은 Task 4에서 table까지 반영해 교체)
-        _set_simple_cell_text(tbl, cells["business_name"][1], cells["business_name"][2], data.get("business_name", ""))
-        _set_simple_cell_text(tbl, cells["meeting_date"][1], cells["meeting_date"][2], data.get("meeting_date", ""))
-        _set_simple_cell_text(tbl, cells["meeting_place"][1], cells["meeting_place"][2], data.get("meeting_place", ""))
-        _set_simple_cell_text(tbl, cells["meeting_topic"][1], cells["meeting_topic"][2], data.get("meeting_topic", ""))
+        for slot in ("business_name", "meeting_date", "meeting_place", "meeting_topic"):
+            tb, r, c = _resolve(cells[slot])
+            if tb is not None:
+                _set_simple_cell_text(tb, r, c, data.get(slot, ""))
 
         # 2b) 커스텀 슬롯 (정적 텍스트) — custom_slots cell 좌표에 data.custom_fields 기록.
         # 미지정 슬롯은 빈 텍스트로 안전 생성, custom_slots 없으면 동작 불변(9-a (ii)).
@@ -340,14 +346,21 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
         for slot in (custom_slots or []):
             sid = slot.get("id")
             try:
-                r, c = int(slot["cell"][0]), int(slot["cell"][1])
+                cc = slot["cell"]
+                if len(cc) >= 3:
+                    t, r, c = int(cc[0]), int(cc[1]), int(cc[2])
+                else:                                  # 2요소 = 기존 v2 = 표0
+                    t, r, c = 0, int(cc[0]), int(cc[1])
             except (TypeError, ValueError, IndexError, KeyError):
                 continue
-            _set_simple_cell_text(tbl, r, c, str(custom_fields.get(sid, "") or ""))
+            tb, r, c = _resolve((t, r, c))
+            if tb is not None:
+                _set_simple_cell_text(tb, r, c, str(custom_fields.get(sid, "") or ""))
 
         # 3) 참석자 셀
         participants = data.get("participants") or []
-        tc5_1 = _find_cell(tbl, cells["participants"][1], cells["participants"][2])
+        tb5, r5, c5 = _resolve(cells["participants"])
+        tc5_1 = _find_cell(tb5, r5, c5) if tb5 is not None else None
         if tc5_1 is not None:
             sl5 = tc5_1.find(f'{_HP}subList')
             for old in sl5.findall(f'{_HP}p'):
@@ -375,7 +388,8 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
                 })
 
         # 4) 총인원 셀
-        tc5_2 = _find_cell(tbl, cells["total_count"][1], cells["total_count"][2])
+        tb52, r52, c52 = _resolve(cells["total_count"])
+        tc5_2 = _find_cell(tb52, r52, c52) if tb52 is not None else None
         if tc5_2 is not None:
             sl52 = tc5_2.find(f'{_HP}subList')
             for old in sl52.findall(f'{_HP}p'):
@@ -396,7 +410,8 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
             })
 
         # 5) 회의내용 셀 — 사진표 deepcopy 보존
-        tc6_1 = _find_cell(tbl, cells["content"][1], cells["content"][2])
+        tb6, r6, c6 = _resolve(cells["content"])
+        tc6_1 = _find_cell(tb6, r6, c6) if tb6 is not None else None
         if tc6_1 is not None:
             sl6 = tc6_1.find(f'{_HP}subList')
             old_paras = sl6.findall(f'{_HP}p')
