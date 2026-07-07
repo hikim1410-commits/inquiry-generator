@@ -168,12 +168,20 @@ def auto_label_cells(grid_cells: list, provider: str = "gemini",
 
 
 def is_standard_map(cell_map: dict) -> bool:
-    """cell_map 이 표준 양식 좌표(DEFAULT_CELLS)와 완전히 동일하면 True."""
+    """cell_map이 표준 양식 좌표(DEFAULT_CELLS, 전부 표0)와 완전히 동일하면 True.
+
+    좌표는 2요소([r,c]=표0, v1/v2 호환)든 3요소([t,r,c], v3)든 모두 판정.
+    """
     if set(cell_map.keys()) != set(DEFAULT_CELLS.keys()):
         return False
-    for slot, (r, c) in DEFAULT_CELLS.items():
+    for slot, (t, r, c) in DEFAULT_CELLS.items():
         rc = cell_map.get(slot)
-        if not rc or int(rc[0]) != r or int(rc[1]) != c:
+        try:
+            got = ((int(rc[0]), int(rc[1]), int(rc[2])) if len(rc) >= 3
+                   else (0, int(rc[0]), int(rc[1])))
+        except (TypeError, ValueError, IndexError):
+            return False
+        if got != (t, r, c):
             return False
     return True
 

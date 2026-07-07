@@ -37,17 +37,17 @@ from src.paths import resource_path
 
 TEMPLATE_MINUTES = resource_path("templates", "회의록_양식.hwpx")
 
-# 표준 양식의 데이터 슬롯 → 셀 좌표 (rowAddr, colAddr).
+# 표준 양식의 데이터 슬롯 → 셀 좌표 (tableAddr, rowAddr, colAddr).
 # 커스텀 양식은 AI 분석 결과(cell_map)로 이 좌표를 덮어쓴다.
-# (rowAddr 0 = 제목행, 1=사업명 … 6=회의내용; col 0=라벨, col 1/2=값)
+# (table 0 = 문서의 첫 표; rowAddr 0 = 제목행, 1=사업명 … 6=회의내용; col 0=라벨, col 1/2=값)
 DEFAULT_CELLS = {
-    "business_name": (1, 1),
-    "meeting_date":  (2, 1),
-    "meeting_place": (3, 1),
-    "meeting_topic": (4, 1),
-    "participants":  (5, 1),
-    "total_count":   (5, 2),
-    "content":       (6, 1),
+    "business_name": (0, 1, 1),
+    "meeting_date":  (0, 2, 1),
+    "meeting_place": (0, 3, 1),
+    "meeting_topic": (0, 4, 1),
+    "participants":  (0, 5, 1),
+    "total_count":   (0, 5, 2),
+    "content":       (0, 6, 1),
 }
 
 # HWP/HWPML 네임스페이스
@@ -271,17 +271,20 @@ def _fill_para_clone(tmpl, text, vertpos):
 # ── 공개 API ─────────────────────────────────────────────────────────────────
 
 def _norm_cells(cell_map):
-    """cell_map(JSON 유래, 값이 [r,c] 리스트일 수 있음)을 DEFAULT_CELLS 위에 병합.
+    """cell_map(JSON 유래)을 DEFAULT_CELLS 위에 병합, (table,row,col) 3-tuple로 정규화.
 
-    값은 (row, col) 튜플로 정규화. 잘못된 항목은 무시하고 기본값 유지.
+    값이 [r,c] 2요소면 표0으로 해석(v1/v2 fieldmap 하위호환), [t,r,c] 3요소는 그대로.
+    잘못된 항목은 무시하고 기본값 유지.
     """
     cells = dict(DEFAULT_CELLS)
     for slot, rc in (cell_map or {}).items():
         if slot not in DEFAULT_CELLS:
             continue
         try:
-            r, c = int(rc[0]), int(rc[1])
-            cells[slot] = (r, c)
+            if len(rc) >= 3:
+                cells[slot] = (int(rc[0]), int(rc[1]), int(rc[2]))
+            else:
+                cells[slot] = (0, int(rc[0]), int(rc[1]))
         except (TypeError, ValueError, IndexError):
             continue
     return cells
@@ -324,10 +327,12 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
             return {"ok": False, "error": "양식 표를 찾을 수 없습니다."}
 
         # 2) 단순 셀 (사업명/일시/장소/주제) — 기존 run 스타일 보존
-        _set_simple_cell_text(tbl, *cells["business_name"], data.get("business_name", ""))
-        _set_simple_cell_text(tbl, *cells["meeting_date"], data.get("meeting_date", ""))
-        _set_simple_cell_text(tbl, *cells["meeting_place"], data.get("meeting_place", ""))
-        _set_simple_cell_text(tbl, *cells["meeting_topic"], data.get("meeting_topic", ""))
+        # cells[slot]은 (table,row,col) 3-tuple(T3) — 표0 전제 임시 어댑터로 r,c만 사용.
+        # (다중 표 정식 지원은 Task 4에서 table까지 반영해 교체)
+        _set_simple_cell_text(tbl, cells["business_name"][1], cells["business_name"][2], data.get("business_name", ""))
+        _set_simple_cell_text(tbl, cells["meeting_date"][1], cells["meeting_date"][2], data.get("meeting_date", ""))
+        _set_simple_cell_text(tbl, cells["meeting_place"][1], cells["meeting_place"][2], data.get("meeting_place", ""))
+        _set_simple_cell_text(tbl, cells["meeting_topic"][1], cells["meeting_topic"][2], data.get("meeting_topic", ""))
 
         # 2b) 커스텀 슬롯 (정적 텍스트) — custom_slots cell 좌표에 data.custom_fields 기록.
         # 미지정 슬롯은 빈 텍스트로 안전 생성, custom_slots 없으면 동작 불변(9-a (ii)).
@@ -342,7 +347,7 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
 
         # 3) 참석자 셀
         participants = data.get("participants") or []
-        tc5_1 = _find_cell(tbl, *cells["participants"])
+        tc5_1 = _find_cell(tbl, cells["participants"][1], cells["participants"][2])
         if tc5_1 is not None:
             sl5 = tc5_1.find(f'{_HP}subList')
             for old in sl5.findall(f'{_HP}p'):
@@ -370,7 +375,7 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
                 })
 
         # 4) 총인원 셀
-        tc5_2 = _find_cell(tbl, *cells["total_count"])
+        tc5_2 = _find_cell(tbl, cells["total_count"][1], cells["total_count"][2])
         if tc5_2 is not None:
             sl52 = tc5_2.find(f'{_HP}subList')
             for old in sl52.findall(f'{_HP}p'):
@@ -391,7 +396,7 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
             })
 
         # 5) 회의내용 셀 — 사진표 deepcopy 보존
-        tc6_1 = _find_cell(tbl, *cells["content"])
+        tc6_1 = _find_cell(tbl, cells["content"][1], cells["content"][2])
         if tc6_1 is not None:
             sl6 = tc6_1.find(f'{_HP}subList')
             old_paras = sl6.findall(f'{_HP}p')

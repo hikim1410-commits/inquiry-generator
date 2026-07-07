@@ -83,7 +83,10 @@ def test_save_cellmap_roundtrip(tpl):
 
 
 def test_save_cellmap_is_standard_recalc(tpl):
-    standard = {k: list(v) for k, v in DEFAULT_CELLS.items()}
+    # DEFAULT_CELLS는 (table,row,col) 3-tuple(T3)이지만 save_minutes_cellmap의
+    # cell_map 저장 포맷은 아직 v2([row,col] 2요소, 표0 전제 — 3요소화는 T5에서).
+    # 여기서는 표0 좌표(row,col)만 뽑아 표준 좌표를 구성한다.
+    standard = {k: [v[1], v[2]] for k, v in DEFAULT_CELLS.items()}
     res = save_minutes_cellmap(tpl, standard)
     assert res["is_standard"] is True
     res2 = save_minutes_cellmap(tpl, {"business_name": [9, 9]})
@@ -150,3 +153,16 @@ def test_annotations_bad_coords_ignored(tpl):
     ]
     res = save_minutes_cellmap(tpl, {}, None, anns)
     assert [(a["row"], a["col"]) for a in res["annotations"]] == [(6, 1)]
+
+
+# ── T3: 좌표 3요소화 — is_standard_map 2/3요소 판정 ──────────────────────────
+
+def test_is_standard_map_2elem_and_3elem():
+    from src.ai.minutes_template_mapper import is_standard_map
+    std2 = {"business_name": [1, 1], "meeting_date": [2, 1], "meeting_place": [3, 1],
+            "meeting_topic": [4, 1], "participants": [5, 1], "total_count": [5, 2],
+            "content": [6, 1]}
+    std3 = {k: [0] + v for k, v in std2.items()}
+    assert is_standard_map(std2) is True     # 기존 v1/v2 파일 형태
+    assert is_standard_map(std3) is True     # v3 형태
+    assert is_standard_map({**std3, "content": [1, 6, 1]}) is False  # 표1이면 비표준

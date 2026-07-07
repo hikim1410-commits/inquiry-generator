@@ -434,3 +434,14 @@ def test_normalize_preserves_custom_fields():
     # 부재 시 키 자체가 없어야(기존 출력 불변)
     out2 = _normalize_minutes(dict(SAMPLE_DATA))
     assert "custom_fields" not in out2
+
+
+# ── T3: 좌표 3요소화 — DEFAULT_CELLS/_norm_cells 3-tuple ─────────────────────
+
+def test_norm_cells_accepts_2_and_3_elem():
+    from src.minutes.hwpx_minutes import _norm_cells
+    cells = _norm_cells({"business_name": [4, 2],          # 2요소 = 표0
+                         "meeting_date": [1, 3, 1]})        # 3요소
+    assert cells["business_name"] == (0, 4, 2)
+    assert cells["meeting_date"] == (1, 3, 1)
+    assert cells["content"] == (0, 6, 1)                    # 기본값도 3-tuple
