@@ -267,6 +267,16 @@ def test_empty_participants(tmp_path):
     r = build_minutes(data, out_path=out)
     assert r["ok"], r.get("error")
     assert zipfile.is_zipfile(out)
+    # 한글 하드크래시 방지 불변식: 모든 셀 subList에 문단이 1개 이상.
+    # 문단 0개 셀이 있으면 한글이 파일을 여는 즉시 죽는다
+    # (HwpApp.dll+0x254854, 0xc0000005 — 2026-07-07 실측).
+    root = _parse_section0(out)
+    for tc in root.findall(f'.//{_HP}tc'):
+        sl = tc.find(f'{_HP}subList')
+        if sl is not None:
+            addr = tc.find(f'{_HP}cellAddr')
+            assert len(sl.findall(f'{_HP}p')) >= 1, \
+                f"문단 0개 셀: {addr.attrib if addr is not None else '?'}"
 
 
 def test_single_participant(tmp_path):

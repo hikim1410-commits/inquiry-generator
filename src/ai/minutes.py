@@ -134,7 +134,9 @@ def _normalize_minutes(data: dict) -> dict:
     # 있을 때만 키 추가(부재 시 기존 출력 불변).
     cf = data.get("custom_fields")
     if isinstance(cf, dict):
-        out["custom_fields"] = {str(k): str(v) for k, v in cf.items()}
+        # None 값은 빈칸으로 — str(None)이면 문서에 "None"이 그대로 찍힌다.
+        out["custom_fields"] = {str(k): ("" if v is None else str(v))
+                                for k, v in cf.items()}
 
     return out
 

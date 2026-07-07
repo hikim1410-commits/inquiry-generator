@@ -239,16 +239,25 @@ try {{
         ForEach-Object {{ Log "install 내 프로세스 종료 pid=$($_.ProcessId) ($($_.Name))"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
 }} catch {{ Log "install 프로세스 정리 예외: $_" }}
 Start-Sleep -Seconds 1
-# 2) 파일 교체 (덮어쓰기, 삭제 없음 → kordoc-runtime·config·token 보존)
+# 2) 파일 교체 — 2단 robocopy
+#    (a) 루트: /E 덮어쓰기(삭제 없음) → staging에 없는 사용자·런타임 데이터
+#        (config.json·token.json·app-log.txt·kordoc-runtime·minutes_templates) 보존.
+#    (b) _internal: /MIR 미러링 → 구빌드 잔재 퍼지. _internal은 100% PyInstaller
+#        빌드 전용 폴더라 사용자 데이터가 없어 안전하다. 비퍼지(/E만)로는 Python
+#        마이너 점프 시 구버전 .pyd/DLL이 대량 잔존한다(2026-07-06 3.12→3.13 실측:
+#        5,726개 88.7MB 잔재 + pywintypes 이중로드로 견적서 COM CLSID 오류 유발).
 #    /IS /IT 제거: 동일 파일은 건너뛰어 잠금 충돌과 복사 시간을 줄인다
 #    (변경된 파일은 크기·수정시각이 달라 robocopy 기본 동작으로 정상 복사됨).
 #    잠금 등으로 실패하면(8+) 잠시 후 1회 재시도 — onedir 앱은 부분 복사 시
 #    exe와 _internal/ DLL 불일치로 부팅 불능(Themida 보호 exe는 무결성 검사 실패)이 된다.
 $rc = 0
 for ($attempt = 1; $attempt -le 2; $attempt++) {{
-    robocopy $staging $install /E /R:5 /W:2 | Out-Null
-    $rc = $LASTEXITCODE
-    Log "robocopy 시도 $attempt 종료코드 $rc"
+    robocopy $staging $install /E /XD (Join-Path $staging '_internal') /R:5 /W:2 | Out-Null
+    $rc1 = $LASTEXITCODE
+    robocopy (Join-Path $staging '_internal') (Join-Path $install '_internal') /MIR /R:5 /W:2 | Out-Null
+    $rc2 = $LASTEXITCODE
+    $rc = [Math]::Max($rc1, $rc2)
+    Log "robocopy 시도 $attempt 종료코드 root=$rc1 internal=$rc2"
     if ($rc -lt 8) {{ break }}          # 0~7 = 성공(비트 플래그), 8+ = 하나 이상 복사 실패
     Start-Sleep -Seconds 3
 }}

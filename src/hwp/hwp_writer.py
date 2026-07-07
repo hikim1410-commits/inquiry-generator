@@ -124,8 +124,31 @@ def _clear_gen_py_cache():
         log(f"자가복구: gen_py 캐시 정리 실패: {e}")
 
 
+def _use_dynamic_dispatch():
+    """pyhwpx가 쓰는 gencache.EnsureDispatch(조기바인딩/makepy)를 동적(지연바인딩)
+    Dispatch로 교체한다.
+
+    PyInstaller 동결 빌드에서 pywintypes313.dll이 두 경로(_internal 루트 +
+    pywin32_system32)로 이중 로드되면, makepy 생성 클래스의 CLSID(PyIID)와
+    pythoncom이 인식하는 PyIID가 서로 다른 인스턴스의 타입이 된다. 그 결과
+    DispatchBaseClass.__init__의 QueryInterface(self.CLSID)가
+    "Only strings and iids can be converted to a CLSID"(TypeError)로 죽는다
+    (2026-07-07 실측, v1.5.0 3.13 빌드). 동적 Dispatch는 makepy 클래스/CLSID를
+    아예 쓰지 않아 문제를 원천 회피한다. pyhwpx는 win32com.client.constants를
+    사용하지 않으므로 지연바인딩 전환이 안전하다(실기 검증 완료).
+    """
+    import win32com.client.dynamic
+    import win32com.client.gencache as _gc
+
+    def _ensure_dynamic(prog_id, *args, **kwargs):
+        return win32com.client.dynamic.Dispatch(prog_id)
+
+    _gc.EnsureDispatch = _ensure_dynamic
+
+
 def make_hwp():
     """한글 COM 인스턴스 생성. 첫 기동 실패 시 자가복구(서버 선기동/캐시 정리) 후 재시도."""
+    _use_dynamic_dispatch()  # 동결 빌드 pywintypes 이중로드 → CLSID 변환오류 회피
     from pyhwpx import Hwp
     try:
         return Hwp(new=True, visible=False, register_module=True)

@@ -2427,9 +2427,11 @@ async function runMinutesAiAutoMap() {
   if (!r.ok) { toast(r.error || 'AI 자동 매핑 실패', 'err', 5000); return; }
 
   const aiAnns = mnCellMapToAnns(normCellMap(r.cell_map));
-  const aiCells = new Set(aiAnns.map(a => a.row + ',' + a.col));
+  // 키에 table 포함 — row,col만 쓰면 표1+의 커스텀 핀이 표0 AI 슬롯과 좌표가
+  // 같을 때 오삭제된다(AI 슬롯은 전부 표0).
+  const aiCells = new Set(aiAnns.map(a => mnT(a) + ',' + a.row + ',' + a.col));
   // 기존 핀 중 AI가 새로 지정한 셀과 겹치는 것만 제거, 나머지(커스텀 라벨 등)는 보존
-  mnEditor.annotations = mnEditor.annotations.filter(a => !aiCells.has(a.row + ',' + a.col));
+  mnEditor.annotations = mnEditor.annotations.filter(a => !aiCells.has(mnT(a) + ',' + a.row + ',' + a.col));
   aiAnns.forEach(a => {
     const [nx, ny] = mnPinPos(a);
     mnEditor.annotations.push({ ...a, nx, ny });

@@ -96,3 +96,37 @@
   → Unblock 없이 실행되는지 시뮬레이션 (M15 패키징 스모크에 포함).
 - **부수 교훈**: 배포 V1.1은 AIDEN-DESKTOP의 Python 3.13으로 빌드돼 이 PC(3.12/3.14)와
   드리프트. 빌드는 **py -3.12로 통일**(spec·bat 표기와 일치), 빌드 PC 변경 시 버전 먼저 확인.
+
+## 2026-07-07: 견적서 COM 사망 + 회의록 한글 크래시 — v1.5.1 이중 수정
+- **발생①(견적서)**: v1.5.0(3.13 빌드) 업데이트 직후 견적서 생성 시
+  `TypeError: Only strings and iids can be converted to a CLSID.`
+  (pyhwpx `EnsureDispatch("HWPFrame.HwpObject")` — 올바른 문자열 인자인데도 실패).
+  자가복구(서버 선기동·gen_py 정리) 전부 무효. 실패 시도마다 Hwp.exe -Automation
+  좀비 +1 → 32개 누적 실측.
+- **원인①(확정)**: PyInstaller 동결 빌드에 `pywintypes313.dll`이 두 경로
+  (`_internal\` 루트 + `_internal\pywin32_system32\`)로 들어가 **이중 초기화** →
+  makepy 클래스의 CLSID(PyIID)와 pythoncom의 PyIID가 서로 다른 인스턴스 타입 →
+  `DispatchBaseClass.__init__`의 `QueryInterface(self.CLSID)`가 타입 인식 실패.
+  같은 pywin32 312를 비동결 venv에서 돌리면 정상(=pywin32 버그 아님),
+  같은 DLL을 이름 바꿔 2회 로드하면 동일 오류 재현(기계론 증명).
+- **수정①**: `hwp_writer._use_dynamic_dispatch()` — pyhwpx가 쓰는
+  `gencache.EnsureDispatch`를 `win32com.client.dynamic.Dispatch`(지연바인딩)로
+  교체. makepy/CLSID를 아예 안 쓰므로 원천 회피. pyhwpx는 `constants` 미사용이라
+  안전(실기에서 생성→insert_text→quit 검증). 초기 설계(2026-06 dynamic.Dispatch
+  late binding)로의 복귀이기도 함.
+- **발생②(회의록)**: 생성은 성공하는데 자동 열기에서 한글이 즉사 →
+  사용자에겐 "생성 실패"로 보임. 이벤트 로그: HwpApp.dll+0x254854, 0xc0000005,
+  매번 동일(6/25·6/30에도 동일 시그니처 — v1.2.8 시절부터 잠복).
+- **원인②(확정, GUI 이분탐색 3회)**: `participants`가 빈 배열이면
+  `build_minutes`가 참석자 셀 문단을 전부 제거 후 아무것도 안 넣어
+  **문단 0개 subList 셀** 생성 → 한글은 "셀당 최소 1문단" 불변식 위반 파일을
+  여는 즉시 하드 크래시. zip/XML 문법 검증으론 못 잡는 의미론 결함.
+- **수정②**: 참석자 비면 빈 문단 1개 강제 삽입(hwpx_minutes.py) +
+  test_empty_participants에 "모든 셀 문단 ≥1" 불변식 검증 추가.
+- **부진범(같이 고침)**: 업데이터 robocopy가 /E(비퍼지)라 3.12→3.13 점프에서
+  구빌드 잔재 5,726개(88.7MB, python312.dll·cp312 .pyd·중복 dist-info) 잔존.
+  → 2단 robocopy로 변경: 루트 /E(사용자 데이터 보존) + `_internal` /MIR(퍼지).
+- **교훈**: ① HWPX '유효성'은 zip/XML 문법이 아니라 **한글이 실제로 열리는가**로
+  검증할 것(셀당 최소 1문단 같은 의미론 불변식 존재). ② COM 실패 경로에서
+  기동된 서버 프로세스는 좀비로 남는다 — 실패 시각과 tasklist 대조가 진단 지름길.
+  ③ onedir 업데이트에서 Python 마이너 점프는 비퍼지 복사와 상극.

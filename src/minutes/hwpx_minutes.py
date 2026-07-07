@@ -325,6 +325,11 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
             sl5 = tc5_1.find(f'{_HP}subList')
             for old in sl5.findall(f'{_HP}p'):
                 sl5.remove(old)
+            # 참석자가 비어도 빈 문단 1개는 반드시 남긴다. 한글은 문단 0개인
+            # subList 셀을 여는 즉시 하드 크래시한다(HwpApp.dll+0x254854,
+            # 0xc0000005 — 2026-07-07 실측, 셀당 최소 1문단 불변식).
+            if not participants:
+                participants = [""]
             for idx, line in enumerate(participants):
                 p = ET.SubElement(sl5, f'{_HP}p', {
                     'id': '2147483648' if idx == 0 else '0',
