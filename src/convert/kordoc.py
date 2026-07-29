@@ -310,6 +310,7 @@ def convert_file(path: str) -> dict:
         try:
             r = _run(cmd, timeout=CONVERT_TIMEOUT)
         except subprocess.TimeoutExpired:
+            _log(f"kordoc 변환 타임아웃 [{os.path.basename(path)}] ({CONVERT_TIMEOUT}초)")
             return _file_result(
                 path, error="변환 시간이 초과되었습니다 (파일이 너무 크거나 손상됨).",
                 error_code="timeout")
@@ -323,6 +324,7 @@ def convert_file(path: str) -> dict:
         with open(out_md, encoding="utf-8") as f:
             md = _clean_markdown(f.read())
         if not md:
+            _log(f"kordoc 변환 결과 0자 [{os.path.basename(path)}] — 스캔 문서 가능성")
             return _file_result(
                 path, error="문서에서 텍스트를 추출하지 못했습니다 (스캔 이미지일 수 있음).",
                 error_code="empty_output")

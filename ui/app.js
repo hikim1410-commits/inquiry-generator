@@ -569,9 +569,15 @@ function wireDropzone(sel) {
   dz.addEventListener('drop', e => {
     e.preventDefault();
     dz.classList.remove('drag-over');
-    if (e.dataTransfer?.files?.length) {
-      toast('파일 경로를 확인할 수 없습니다. [파일 선택…] 버튼을 이용해 주세요.', 'warn', 4000);
-    }
+    if (!e.dataTransfer?.files?.length) return;
+    // 네이티브 핸들러(Python _on_drop → onNativeFilesDropped)도 같은 요소에서 함께
+    // 발화한다 — 1초 안에 네이티브 경로 전달이 안 왔을 때만 안내 (성공 시 토스트 금지)
+    const droppedAt = Date.now();
+    setTimeout(() => {
+      if (_lastNativeDropAt < droppedAt) {
+        toast('파일 경로를 확인할 수 없습니다. [파일 선택…] 버튼을 이용해 주세요.', 'warn', 4000);
+      }
+    }, 1000);
   });
 }
 
@@ -584,7 +590,9 @@ function wireDropzones() {
 }
 
 /* Python → JS 드롭 통지 (api.py _on_drop → evaluate_js) */
+let _lastNativeDropAt = 0;
 window.onNativeFilesDropped = function(data) {
+  _lastNativeDropAt = Date.now();
   if (data.unmatched && data.unmatched.length) {
     toast(`경로를 가져오지 못한 파일: ${data.unmatched.join(', ')}. [파일 선택…] 버튼을 이용하세요.`, 'warn', 5000);
   }
@@ -593,14 +601,75 @@ window.onNativeFilesDropped = function(data) {
   else handleDroppedPaths(data.paths);
 };
 
-/* 설치/변환 진행 overlay 업데이트 */
+/* ---------- 설치/변환 진행 overlay + 진행바 ----------
+   진행 통지마다 overlay(true)를 부르면 _overlayCount가 통지 수만큼 쌓여
+   done의 overlay(false) 1회로는 0이 안 되고 로딩바가 영영 안 꺼진다(v1.6.1
+   스캔 PDF 폴백의 추가 통지로 표면화). 여기서는 첫 통지에서만 켜고 이후엔
+   메시지·진행바만 갱신한다. */
+let _convOn = false;        // 이 흐름이 overlay를 켰는지 (딱 1회만 증가)
+let _convTicker = null;     // 시간 기반 진행 추정 타이머
+let _convPctFloor = 0;      // 현재 파일 시작 시점의 누적 %
+let _convPctNow = 0;        // 현재 표시 중인 % (단계 전환 시 후퇴 방지)
+
+function _convBar(show, pct) {
+  const bar = $('#overlay-bar'), fill = $('#overlay-bar-fill'), lbl = $('#overlay-pct');
+  if (!bar) return;
+  bar.classList.toggle('hidden', !show);
+  lbl.classList.toggle('hidden', !show);
+  if (show) {
+    const p = Math.max(0, Math.min(100, Math.round(pct)));
+    _convPctNow = p;
+    fill.style.width = p + '%';
+    lbl.textContent = p + '%';
+  } else {
+    _convPctNow = 0;
+  }
+}
+
+function _convStopTicker() {
+  if (_convTicker) { clearInterval(_convTicker); _convTicker = null; }
+}
+
+/* 단일 단계(스캔 PDF AI 전사 등)는 중간 진행률이 없어 예상 소요 기반으로
+   from→cap 까지 서서히 채운다 — done 통지가 100%로 마감 */
+function _convEase(from, cap, estMs) {
+  _convStopTicker();
+  from = Math.max(from, _convPctNow);          // 단계 전환 시 바가 뒤로 후퇴하지 않게
+  cap = Math.max(cap, from);
+  const t0 = Date.now();
+  _convBar(true, from);
+  _convTicker = setInterval(() => {
+    _convBar(true, from + (cap - from) * Math.min(1, (Date.now() - t0) / estMs));
+  }, 400);
+}
+
 window.__convertProgress = function(info) {
+  if (info.phase === 'done') {
+    _convStopTicker();
+    _convBar(true, 100);
+    if (_convOn) { _convOn = false; overlay(false); }
+    setTimeout(() => _convBar(false), 400);
+    _convPctFloor = 0;
+    return;
+  }
+  let msg;
   if (info.phase === 'install') {
-    overlay(true, `kordoc 설치 중... (${info.msg || ''})`);
-  } else if (info.phase === 'convert') {
-    overlay(true, `변환 중 (${info.i}/${info.total}) — ${info.name || ''}`);
-  } else if (info.phase === 'done') {
-    overlay(false);
+    msg = `kordoc 설치 중... (${info.msg || ''})`;
+    _convEase(0, 90, 30000);                 // npm install 실측 약 30초
+  } else if (info.msg) {                     // 부가 단계 (스캔 PDF AI 전사 등)
+    msg = info.msg;
+    _convEase(_convPctFloor, 95, 35000);     // 비전 전사 실측 약 30초
+  } else {                                   // 파일 단위 변환 (i/total)
+    const total = info.total || 1;
+    msg = `변환 중 (${info.i}/${total}) — ${info.name || ''}`;
+    _convPctFloor = ((info.i - 1) / total) * 100;
+    _convEase(_convPctFloor, (info.i / total) * 95, 8000);
+  }
+  if (_convOn) {
+    $('#overlay-msg').textContent = msg;
+  } else {
+    _convOn = true;
+    overlay(true, msg);
   }
 };
 
@@ -609,6 +678,7 @@ async function convertInto(paths, attachments, renderFn) {
   if (!paths || !paths.length) return;
   overlay(true, '변환 준비 중...');
   const r = await call('convert_files', paths);
+  if (_convOn) window.__convertProgress({ phase: 'done' }); // 백엔드 예외로 done 통지가 누락돼도 정리
   overlay(false);
   if (!r.ok) {
     toast(r.error_code === 'node_missing'

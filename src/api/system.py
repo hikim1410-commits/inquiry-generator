@@ -170,6 +170,7 @@ class SystemApi:
                 out.update(ok=True, markdown=r["markdown"], chars=r["chars"],
                            error="", error_code="", vision_ocr=True)
                 return out
+            _log(f"스캔 PDF 폴백 실패 [{path}]: {r.get('error', '')}")
             result["error"] = (f"스캔 PDF AI 전사 실패: {r.get('error', '')} "
                                "(원본: 텍스트 레이어 없음)")
         except Exception as e:

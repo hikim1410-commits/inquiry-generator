@@ -11,6 +11,14 @@ _HP = '{http://www.hancom.co.kr/hwpml/2011/paragraph}'
 _HS = '{http://www.hancom.co.kr/hwpml/2011/section}'
 
 
+@pytest.fixture(autouse=True)
+def _isolate_app_log(tmp_path, monkeypatch):
+    """테스트 로그를 tmp로 격리 — 실사용 app-log.txt에 테스트 실패 기록이 섞여
+    실제 장애 진단을 방해하던 문제 방지 (2026-07-29 PDF 파싱 오진 사례)."""
+    from src import logutil
+    monkeypatch.setattr(logutil, "LOG_PATH", str(tmp_path / "app-log.txt"))
+
+
 @pytest.fixture
 def make_multi_table_tpl():
     """표준 회의록 양식에 표0의 완전한 사본을 표1로 추가한 hwpx 생성기.
