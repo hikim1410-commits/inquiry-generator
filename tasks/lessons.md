@@ -1,5 +1,29 @@
 # 교훈 기록 (Lessons Learned)
 
+## 2026-07-22: 경비 '경비' 라벨 미병합 — 병합 실패가 아니라 진단 코드 크래시로 인한 오진
+- **발생**: 템플릿의 경비 카테고리 열이 A17(2행 병합)+개별 6셀로 깨져 있어 산출물에서
+  '경비' 라벨이 위 2행만 덮임(육안 결함). 6/17 밤 복구 스크립트(`_fix_template.py`)가
+  실패한 것으로 보였고, "TableMergeCell 병합 실패"로 오진해 hwp_writer에
+  BreakLine 우회(미커밋)를 만들다 중단된 상태였다.
+- **원인(확정, 2026-07-22 재현)**: 병합 시퀀스
+  `TableCellBlock→TableCellBlockExtend→TableLowerCell×N→TableMergeCell`은
+  **이미 병합된 셀에서 시작해도 정상 동작**한다. 복구 스크립트는 병합·검증까지
+  성공한 뒤, **진단용 `get_selected_text()`가 `InitScan(Range=0xFF)` COM 오류로
+  크래시**(v1.5.1의 dynamic.Dispatch 지연 바인딩은 named 인자 미지원)해
+  `save_as` 직전에 죽었다 → 저장이 안 됐을 뿐인데 "병합 실패"로 보였다.
+- **수정**: 진단 읽기를 try/except로 무해화 후 재실행 → 병합 저장 성공(248,320B).
+  필드 117개 집합 동일·재열기 후 병합 유지 확인, 템플릿 교체. hwp_writer의
+  BreakLine 우회(오진 기반, 첫 행 셀만 늘려 병합과 비등가)는 폐기하고 커밋본
+  (검증된 TableMergeCell 시퀀스) 복원. `pytest -m hwp` 6건 green +
+  exp12 PDF 렌더 육안 확인('경비'가 12행 전체 관통).
+- **재발 방지**: `test_template_expense_category_merged` 추가 — 템플릿 경비
+  카테고리 열이 단일 병합 셀인지 KeyIndicator 주소로 검증(-m hwp).
+- **교훈**: ① dynamic.Dispatch 환경에선 pyhwpx 메서드 중 named 인자를 쓰는 것
+  (`get_selected_text`→InitScan 등)이 COM 오류를 낸다 — 진단·부가 경로에서도
+  본 작업을 죽이지 않게 격리할 것. ② "병합 실패"처럼 보이는 증상은 어느 단계에서
+  죽었는지(병합? 검증? 저장?) 로그로 특정한 뒤 진단할 것 — 성공한 작업이
+  저장 전 크래시로 증발하면 실패로 오진된다.
+
 ## 2026-07-02: 업데이트 적용 실패 — 동결 빌드에서 "unknown encoding: utf-8-sig" (v1.4.0)
 - **발생**: 실제 사용자 PC에서 [지금 업데이트] 클릭 → "업데이트 스크립트 작성 실패:
   unknown encoding: utf-8-sig" 토스트. `%TEMP%\navion_update\apply_update.ps1`이
@@ -130,3 +154,32 @@
   검증할 것(셀당 최소 1문단 같은 의미론 불변식 존재). ② COM 실패 경로에서
   기동된 서버 프로세스는 좀비로 남는다 — 실패 시각과 tasklist 대조가 진단 지름길.
   ③ onedir 업데이트에서 Python 마이너 점프는 비퍼지 복사와 상극.
+
+## 2026-07-29: 첨부 PDF 파싱 실패 (스캔 PDF) + 감사에서 나온 읽기/쓰기 결함 일괄
+- **발생**: 견적서 AI 초안에서 Downloads의 PDF 첨부가 "텍스트를 추출하지 못했습니다"로
+  실패. 실측 재현 결과 해당 PDF는 텍스트 레이어가 없는 스캔(이미지 2장, 텍스트 0자).
+- **원인**: kordoc(pdfjs)·pypdf·fitz 모두 텍스트 레이어가 없으면 0자 — OCR 부재가
+  구조적 원인. (기각한 가설: 배포 zip npm 누락 — v1.6.0 zip은 정상, 단 로컬 dist
+  폴더는 _nodejs/node_modules 누락 상태였음 / UI 배선 문제 — 텍스트 PDF는 2,847자
+  정상 변환 / kordoc 3.18.1 회귀 — 없음)
+- **수정**: empty_output PDF에 한해 pypdfium2 렌더 → 설정된 LLM 비전 전사 폴백
+  (src/convert/pdf_ocr.py + llm.complete_text + SystemApi._vision_pdf_fallback).
+  실측: 스캔 견적서 1페이지 → 1,626자 마크다운(표 포함) 전사 성공.
+- **부진범(빌드)**: navion_quote.spec이 npm 패키지 부재 시 조용히 건너뜀 →
+  npm 없는 번들 출고 가능성. SystemExit로 빌드 중단하게 변경.
+- **교훈**: ① "PDF 파싱 실패"는 파일마다 원인이 다르다 — 텍스트 레이어 유무를
+  fitz/pypdf로 먼저 가려라. ② 빌드 스펙의 조건부 copy는 누락 시 fail-loud가 원칙.
+
+## 2026-07-29: HWP 읽기/쓰기 감사 결함 13건 (Opus 감사 2팀 교차확인)
+- **HWP 바이너리 파서**: inline 컨트롤(4~9,19,20)을 2바이트만 소비해 본문 오염
+  ('수신기관명汫ॣ') — 확장 컨트롤과 동일하게 16바이트 소비로 수정(hwp_scan.py).
+- **AI 재매핑 데이터 소실**: save_minutes_fieldmap이 custom_slots/annotations 없이
+  파일을 통째로 재작성 → [AI 자동 매핑] 클릭만으로 사용자 핀 영구 소실. 기존 값
+  승계로 수정. 같은 파일을 두 스키마로 쓰는 이중 저장 경로가 근본 원인.
+- **커스텀 견적서 템플릿 no-op**: scan_template이 스캔만 하고 생성은 항상 내장
+  템플릿 사용(리팩토링 이전부터). data 폴더 복사 + 워커 재생성으로 실제 적용되게 수정.
+- 그 외: 스캔 좌표 하드코딩(사이드카 우선), subList None 크래시, .work.hwp 잔류,
+  config 손상 시 무백업 덮어쓰기, updater _internal 부재 오판 등 — 상세는 커밋 참조.
+- **교훈**: ① 읽기 경로와 쓰기 경로가 좌표/규칙을 공유하지 않으면 반드시 어긋난다
+  (쓰기는 cell_map, 읽기는 고정 좌표). ② 같은 파일을 쓰는 저장 함수가 2개면
+  한쪽이 다른 쪽 키를 지운다 — 병합 저장이 기본값이어야 한다.

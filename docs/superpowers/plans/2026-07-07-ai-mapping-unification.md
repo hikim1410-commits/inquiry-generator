@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 저장소 루트: `C:\Users\김형일\Documents\Claude\Projects\codes\inquiry generator`
+- 저장소 루트: `D:\Projects\codes\inquiry generator`
 - 테스트 실행: `PYTHONDONTWRITEBYTECODE=1 "C:/Users/김형일/AppData/Local/Programs/Python/Python312/python.exe" -m pytest tests/ -q -p no:cacheprovider` (전체 3~4초)
 - **`git add -A`/`git add .` 절대 금지** — 워킹트리에 무관한 WIP(`src/hwp/hwp_writer.py` 미스테이지 수정, 언트래킹 `_diag_*` 파일들)가 있음. 각 Task에 명시된 파일만 스테이지. `src/hwp/hwp_writer.py`는 절대 스테이지/수정 금지.
 - 커밋 메시지: 한국어, `feat(minutes): ...` 형식, 끝에 `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`

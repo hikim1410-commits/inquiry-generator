@@ -5,6 +5,8 @@ pyhwpx>=0.44        # 한글(HWP) COM 자동화 + 보안모듈 자동등록
 requests>=2.30      # Gemini REST 호출
 openpyxl>=3.1       # (참고용) 엑셀 모델 분석
 olefile>=0.46       # HWP 바이너리 스캔 (PrvText/BodyText)
+pypdfium2>=4        # 스캔 PDF → 이미지 렌더 (LLM 비전 전사 폴백)
+Pillow>=10          # pypdfium2 렌더 결과 PNG 인코딩
 pywin32>=305        # COM, DPAPI(win32crypt) 키 암호화
 # Google Drive 연동 (선택 — 미설치 시 Drive 기능만 비활성)
 google-api-python-client>=2.0

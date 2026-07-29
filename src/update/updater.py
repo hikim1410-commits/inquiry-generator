@@ -254,8 +254,12 @@ $rc = 0
 for ($attempt = 1; $attempt -le 2; $attempt++) {{
     robocopy $staging $install /E /XD (Join-Path $staging '_internal') /R:5 /W:2 | Out-Null
     $rc1 = $LASTEXITCODE
-    robocopy (Join-Path $staging '_internal') (Join-Path $install '_internal') /MIR /R:5 /W:2 | Out-Null
-    $rc2 = $LASTEXITCODE
+    if (Test-Path -LiteralPath (Join-Path $staging '_internal')) {{
+        robocopy (Join-Path $staging '_internal') (Join-Path $install '_internal') /MIR /R:5 /W:2 | Out-Null
+        $rc2 = $LASTEXITCODE
+    }} else {{
+        $rc2 = 0   # zip에 _internal이 없으면(레이아웃 변경·onefile) 건너뜀 — 16으로 오판 방지
+    }}
     $rc = [Math]::Max($rc1, $rc2)
     Log "robocopy 시도 $attempt 종료코드 root=$rc1 internal=$rc2"
     if ($rc -lt 8) {{ break }}          # 0~7 = 성공(비트 플래그), 8+ = 하나 이상 복사 실패

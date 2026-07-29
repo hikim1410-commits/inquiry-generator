@@ -261,12 +261,17 @@ def save_minutes_fieldmap(template_path: str, map_result: dict) -> str:
     """
     path = _fieldmap_path(template_path)
     cell_map = _norm_cell_map(map_result.get("cell_map", {}))
+    # 같은 파일을 save_minutes_cellmap(사용자 편집본)이 custom_slots·annotations까지
+    # 넣어 쓴다 — AI 재매핑이 그 두 키를 날리지 않도록 기존 값을 승계한다.
+    prev = load_minutes_fieldmap(template_path)
     data = {
         "version": 3,
         "template": os.path.basename(template_path),
         "is_standard": is_standard_map(cell_map),
         "cell_map": cell_map,
         "unmapped": map_result.get("unmapped", []),
+        "custom_slots": prev.get("custom_slots", []),
+        "annotations": prev.get("annotations", []),
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)

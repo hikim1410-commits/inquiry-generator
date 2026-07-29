@@ -44,7 +44,7 @@ def test_base_filename_bad_date_falls_back_to_today():
 
 def test_quote_paths_extensions(tmp_path):
     p = qs.quote_paths(str(tmp_path), "용역", "2026-01-05")
-    assert p["hwp"].endswith("견적서_용역_260105.hwp")
+    assert p["hwp"].endswith("견적서_용역_260105.hwpx")
     assert p["pdf"].endswith(".pdf")
     assert p["json"].endswith(".quote.json")
     assert os.path.dirname(p["hwp"]) == str(tmp_path)

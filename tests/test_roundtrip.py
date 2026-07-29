@@ -10,7 +10,7 @@ import pytest
 
 from src.engine.calc import LaborRow, ExpenseRow, calculate
 from src.hwp.field_map import build_render_plan
-from src.scan.hwp_scan import parse_hwp, _read_bodytext
+from src.scan.hwp_scan import parse_hwp, parse_hwpx_quote, _read_bodytext
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(BASE, "output", "_test")
@@ -47,6 +47,35 @@ def _golden_result():
                    qty_text="13명", unit_price=30000, qty=13),
     ]
     return calculate(labor, expenses, profit_on=True, trim=0.0)
+
+
+def test_roundtrip_hwpx_output():
+    """v1.7 기본 산출물(.hwpx) 라운드트립 — SaveAs HWPX 변환 + zip 재파싱."""
+    import zipfile
+
+    from src.hwp.hwp_writer import generate_once
+
+    plan = build_render_plan(_golden_doc(), _golden_result())
+    out_hwpx = os.path.join(OUT_DIR, "roundtrip_22m.hwpx")
+    report = generate_once(
+        {"fields": plan.fields, "labor_used": plan.labor_used,
+         "exp_used": plan.exp_used, "show_trim": plan.show_trim},
+        out_hwpx)
+
+    assert report["hwp"] == out_hwpx and os.path.getsize(out_hwpx) > 10000
+    # 진짜 HWPX(zip)인지 — 확장자만 hwpx인 HWP 바이너리면 여기서 실패
+    with zipfile.ZipFile(out_hwpx) as zf:
+        names = zf.namelist()
+        assert "Contents/section0.xml" in names
+    # 임시 작업 사본(.work.hwp)이 남지 않아야 함
+    assert not os.path.exists(out_hwpx + ".work.hwp")
+
+    meta = parse_hwpx_quote(out_hwpx)
+    assert meta.error == ""
+    assert meta.amount == 22000000
+    assert "라이다" in meta.service_name
+    assert meta.date == "2026-06-10"
+    assert "한국과학기술연구원" in meta.recipient
 
 
 def test_roundtrip_22m_golden():
@@ -231,3 +260,30 @@ def test_no_profit_and_trim_variant():
     assert "30,000,000" in body
     if plan.show_trim:
         assert "만원미만 절삭" in body
+
+
+def test_template_expense_category_merged():
+    """템플릿 불변식: 경비 카테고리('경비') 열이 exp1~8 전 행 단일 병합 셀.
+
+    2026-07-22 회귀 가드 — 템플릿이 미병합(개별 셀)으로 깨지면 산출물에서
+    '경비' 라벨이 일부 행만 덮는 육안 결함이 재발한다(진단: 고유 셀 주소 수).
+    """
+    from src.hwp.hwp_writer import make_hwp, TEMPLATE_DEFAULT
+
+    hwp = make_hwp()
+    try:
+        hwp.open(os.path.abspath(TEMPLATE_DEFAULT), arg="forceopen:true")
+        addrs = []
+        for i in range(1, 9):
+            assert hwp.MoveToField(f"exp{i}_name", True, True, False), f"exp{i}_name 없음"
+            hwp.Run("TableLeftCell")
+            ki = hwp.KeyIndicator()
+            addrs.append(ki[-1] if ki else "?")
+        hwp.Run("FileClose")
+        uniq = set(addrs)
+        assert len(uniq) == 1, f"경비 카테고리 열이 미병합(고유 셀 {len(uniq)}개): {sorted(uniq)}"
+    finally:
+        try:
+            hwp.quit()
+        except Exception:
+            pass

@@ -1252,7 +1252,7 @@ async function runDiagnose() {
   openDiag('환경 점검',
     diagLine('한글(HWP) COM 등록', r.hwp_com, r.hwp_com ? '사용 가능' : '미등록') +
     diagLine('보안 모듈(FilePathChecker)', r.security_module, r.security_module ? '등록됨' : '미등록 — 첫 생성 시 자동 등록') +
-    diagLine('견적서 템플릿', r.template, r.template ? '존재' : '없음 — make_template 실행 필요') +
+    diagLine('견적서 템플릿', r.template, r.template ? '존재' : '없음 — tools/make_template2.py 실행 필요') +
     diagLine(`AI API 키 (${r.ai_provider_label || r.ai_provider || '?'})`, r.ai_key ? true : 'warn', r.ai_key ? '등록됨' : '미등록 (AI 비활성)') +
     diagLine('Google Drive', r.drive_connected ? true : 'warn', r.drive_connected ? '연결됨' : '미연결') +
     diagLine('작업 폴더', r.folder_ok ? true : 'warn', r.folder || '미선택') +
@@ -1286,7 +1286,7 @@ function openDeleteModal(item, kind = 'quote') {
   } else {
     $('#del-title').textContent = '견적서 삭제';
     $('#del-target').textContent = `"${item.service_name || item.filename}" 견적서를 삭제합니다.`;
-    $('#del-files-label').textContent = '폴더에 있는 실제 파일(.hwp/.pdf)도 함께 삭제';
+    $('#del-files-label').textContent = '폴더에 있는 실제 파일(.hwp/.hwpx/.pdf)도 함께 삭제';
     note.textContent = (item.source === 'hwp' && !item.editable)
       ? '외부 HWP라 재편집 데이터가 없습니다. 폴더의 파일을 지우려면 위 항목을 체크하세요(체크 안 하면 변화 없음).'
       : '체크하지 않으면 목록에서만 제거되고(.quote.json만 삭제) 실제 한글/PDF 파일은 폴더에 남습니다.';

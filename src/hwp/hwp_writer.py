@@ -194,35 +194,40 @@ def _scan_fields_com(hwp, hwp_path: str) -> dict:
     """한글 COM으로 템플릿 필드 목록 + max_labor/max_exp 감지."""
     import re
     hwp.open(hwp_path, arg="forceopen:true")
-    fields = set()
-    for opt in (0, 1, 2, 3):
+    try:
+        fields = set()
+        for opt in (0, 1, 2, 3):
+            try:
+                fl = hwp.GetFieldList(0, opt)
+                for f in fl.split("\x02"):
+                    n = f.split("{{")[0].strip()
+                    if n:
+                        fields.add(n)
+            except Exception:
+                pass
+
+        # 연번 최대값 감지
+        max_labor = 0
+        max_exp = 0
+        for f in fields:
+            m = re.match(r"labor(\d+)_", f)
+            if m:
+                max_labor = max(max_labor, int(m.group(1)))
+            m = re.match(r"exp(\d+)_", f)
+            if m:
+                max_exp = max(max_exp, int(m.group(1)))
+
+        # 표준 필드셋과 대조
+        std = _standard_field_set(max(max_labor, MAX_LABOR), max(max_exp, MAX_EXP))
+        unknown = sorted(fields - std)
+        missing = sorted(std - fields)
+        is_standard = not unknown and not missing
+    finally:
+        # 예외 시에도 문서를 닫아 스캔 대상 파일 잠금 잔존 방지
         try:
-            fl = hwp.GetFieldList(0, opt)
-            for f in fl.split("\x02"):
-                n = f.split("{{")[0].strip()
-                if n:
-                    fields.add(n)
+            hwp.Run("FileClose")
         except Exception:
             pass
-
-    # 연번 최대값 감지
-    max_labor = 0
-    max_exp = 0
-    for f in fields:
-        m = re.match(r"labor(\d+)_", f)
-        if m:
-            max_labor = max(max_labor, int(m.group(1)))
-        m = re.match(r"exp(\d+)_", f)
-        if m:
-            max_exp = max(max_exp, int(m.group(1)))
-
-    # 표준 필드셋과 대조
-    std = _standard_field_set(max(max_labor, MAX_LABOR), max(max_exp, MAX_EXP))
-    unknown = sorted(fields - std)
-    missing = sorted(std - fields)
-    is_standard = not unknown and not missing
-
-    hwp.Run("FileClose")
     return {"fields": sorted(fields), "max_labor": max_labor or MAX_LABOR,
             "max_exp": max_exp or MAX_EXP, "is_standard": is_standard,
             "unknown": unknown, "missing": missing}
@@ -269,13 +274,14 @@ def _clear_readonly(path: str):
         pass
 
 
-def _expand_expense_rows(hwp, start_row: int, end_row: int, tpl_name):
+def _expand_expense_rows(hwp, start_row: int, end_row: int, tpl_name,
+                         merge_label: bool = True):
     """경비 표의 마지막 행 아래로 행을 동적 추가하고 표준 슬롯 필드를 부여.
 
     템플릿 기본 경비 행수(보통 8)를 초과하는 견적을 위해, 마지막 경비 행
     바로 아래에 (end_row - start_row)개 행을 만들고 각 행에
     exp{i}_(name|detail|qty|price|amt|ratio) 셀필드를 부여한다.
-    make_template.py의 행 추가 패턴(InsertLowerRow + LowerCell + RightCell)과 동일.
+    tools/make_template2.py의 행 추가 패턴(InsertLowerRow + LowerCell + RightCell)과 동일.
 
     새로 부여하는 필드명은 표준 슬롯명(exp{i}_*)이라 PutFieldText의
     표준→템플릿 번역과 자연히 일치한다(매핑에 없으면 그대로 사용).
@@ -302,7 +308,9 @@ def _expand_expense_rows(hwp, start_row: int, end_row: int, tpl_name):
     # '경비' 카테고리 라벨 셀을 새로 추가된 행들까지 세로 병합
     # (exp_name 셀의 왼쪽 = '경비' 라벨 셀. TableCellBlock→Extend로 블록 잡고
     #  추가 행 수만큼 아래로 확장 후 TableMergeCell — exp12 PDF 렌더로 검증함)
-    if added and hwp.MoveToField(tpl_name("exp1_name"), True, True, False):
+    # merge_label=False(커스텀 fieldmap 템플릿)면 병합 생략 — "exp1_name 왼쪽 셀 =
+    # 카테고리 라벨" 가정이 깨진 표에서 무관한 셀을 병합해 표를 훼손하지 않도록
+    if merge_label and added and hwp.MoveToField(tpl_name("exp1_name"), True, True, False):
         hwp.Run("TableLeftCell")        # '경비' 라벨 셀로 이동
         hwp.Run("TableCellBlock")       # 셀 블록 선택 시작
         hwp.Run("TableCellBlockExtend")  # 확장 선택 모드 ON
@@ -333,67 +341,87 @@ def _fill_document(hwp, plan: dict, out_hwp: str, out_pdf: str = None,
         return std_to_tpl.get(std_name, std_name)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_hwp)), exist_ok=True)
+    # 저장 포맷은 출력 확장자로 결정 (.hwpx → HWPX 강제)
+    out_fmt = "HWPX" if out_hwp.lower().endswith(".hwpx") else "HWP"
+    tpl_ext = os.path.splitext(template)[1].lower()
+    # 템플릿과 출력 확장자가 다르면(.hwp 템플릿 → .hwpx 출력) 내용/확장자 불일치
+    # 파일을 만들지 않도록 임시 작업 사본을 템플릿 확장자로 만들고, SaveAs에서 변환한다
+    work = out_hwp if out_hwp.lower().endswith(tpl_ext) else out_hwp + ".work" + tpl_ext
     # 기존 산출물이 읽기 전용이면 copy2가 PermissionError(WinError 5)를 낼 수 있으므로 먼저 해제
-    _clear_readonly(out_hwp)
-    shutil.copy2(template, out_hwp)
+    _clear_readonly(work)
+    shutil.copy2(template, work)
     # copy2가 템플릿의 읽기 전용 비트까지 복사 → 즉시 해제(편집 가능한 사본 보장)
-    _clear_readonly(out_hwp)
-    hwp.open(out_hwp, arg="forceopen:true")
-
-    def delete_row_at_field(name):
-        if hwp.MoveToField(tpl_name(name), True, True, False):
-            hwp.Run("TableDeleteRow")
-            report["deleted_rows"].append(name)
-
-    labor_used = max(1, min(max_labor_tpl, int(plan["labor_used"])))
-    exp_used = max(1, int(plan["exp_used"]))
-
-    # 경비 항목이 템플릿 기본 행수보다 많으면 행을 동적 추가 (9개 이상 누락 방지)
-    if exp_used > max_exp_tpl:
-        _expand_expense_rows(hwp, max_exp_tpl, exp_used, tpl_name)
-        max_exp_tpl = exp_used
-
-    # 미사용 행 삭제 (아래쪽부터)
-    for i in range(max_labor_tpl, labor_used, -1):
-        delete_row_at_field(f"labor{i}_grade")
-    for i in range(max_exp_tpl, exp_used, -1):
-        delete_row_at_field(f"exp{i}_name")
-    if not plan["show_trim"]:
-        delete_row_at_field("trim_label")
-
-    # 필드 기입 (표준 슬롯명 → 템플릿 필드명 번역)
-    for name, value in plan["fields"].items():
-        hwp.PutFieldText(tpl_name(name), value if value is not None else "")
-
-    # 저장
-    hwp.save_as(out_hwp, format="HWP")
-    _clear_readonly(out_hwp)  # 한글이 읽기 전용 속성을 유지했을 경우 대비(편집 가능 보장)
-    report["hwp"] = out_hwp
-    if out_pdf:
-        try:
-            hwp.save_as(out_pdf, format="PDF")
-            if os.path.exists(out_pdf) and os.path.getsize(out_pdf) > 0:
-                _clear_readonly(out_pdf)
-                report["pdf"] = out_pdf
-            else:
-                report["pdf_error"] = "PDF 파일이 생성되지 않았습니다."
-        except Exception as e:
-            report["pdf_error"] = f"PDF 변환 실패: {e}"
-
-    # 생성한 문서를 자동화(숨김) 한글 세션에서 닫아 파일 잠금을 해제한다.
-    # 닫지 않으면 재사용 세션이 out_hwp를 계속 열어둔 채로 잡고 있어,
-    # 사용자가 그 파일을 열면 한글이 "다른 곳에서 사용 중" → '읽기 전용'으로 연다
-    # (OS 읽기전용 속성 해제(_clear_readonly)로는 절대 풀리지 않는 진짜 원인).
+    _clear_readonly(work)
     try:
-        hwp.Run("FileClose")
-    except Exception:
-        pass
+        hwp.open(work, arg="forceopen:true")
+
+        def delete_row_at_field(name):
+            if hwp.MoveToField(tpl_name(name), True, True, False):
+                hwp.Run("TableDeleteRow")
+                report["deleted_rows"].append(name)
+
+        labor_used = max(1, min(max_labor_tpl, int(plan["labor_used"])))
+        exp_used = max(1, int(plan["exp_used"]))
+
+        # 경비 항목이 템플릿 기본 행수보다 많으면 행을 동적 추가 (9개 이상 누락 방지)
+        if exp_used > max_exp_tpl:
+            _expand_expense_rows(hwp, max_exp_tpl, exp_used, tpl_name,
+                                 merge_label=not std_to_tpl)
+            max_exp_tpl = exp_used
+
+        # 미사용 행 삭제 (아래쪽부터)
+        for i in range(max_labor_tpl, labor_used, -1):
+            delete_row_at_field(f"labor{i}_grade")
+        for i in range(max_exp_tpl, exp_used, -1):
+            delete_row_at_field(f"exp{i}_name")
+        if not plan["show_trim"]:
+            delete_row_at_field("trim_label")
+
+        # 필드 기입 (표준 슬롯명 → 템플릿 필드명 번역)
+        for name, value in plan["fields"].items():
+            hwp.PutFieldText(tpl_name(name), value if value is not None else "")
+
+        # 저장 (SaveAs가 HWP→HWPX 변환까지 수행)
+        _clear_readonly(out_hwp)
+        hwp.save_as(out_hwp, format=out_fmt)
+        _clear_readonly(out_hwp)  # 한글이 읽기 전용 속성을 유지했을 경우 대비(편집 가능 보장)
+        # 저장 실증 — save_as가 조용히 실패해도 "생성 완료"로 보고하지 않는다
+        if not (os.path.exists(out_hwp) and os.path.getsize(out_hwp) > 0):
+            raise RuntimeError(f"{out_fmt} 저장 실패: 산출물이 생성되지 않았습니다.")
+        report["hwp"] = out_hwp
+        if out_pdf:
+            try:
+                hwp.save_as(out_pdf, format="PDF")
+                if os.path.exists(out_pdf) and os.path.getsize(out_pdf) > 0:
+                    _clear_readonly(out_pdf)
+                    report["pdf"] = out_pdf
+                else:
+                    report["pdf_error"] = "PDF 파일이 생성되지 않았습니다."
+            except Exception as e:
+                report["pdf_error"] = f"PDF 변환 실패: {e}"
+    finally:
+        # 열린 문서를 자동화(숨김) 한글 세션에서 닫아 파일 잠금을 해제한다.
+        # 닫지 않으면 재사용 세션이 파일을 계속 잡고 있어, 사용자가 열 때
+        # "다른 곳에서 사용 중" → '읽기 전용'으로 열린다 (OS 속성과 무관한 진짜 원인).
+        # 예외 경로에서도 닫아야 임시 작업 사본 제거가 가능하다.
+        try:
+            hwp.Run("FileClose")
+        except Exception:
+            pass
+        # 임시 작업 사본 제거 — 실패 경로에서도 .work.hwp가 작업 폴더에 남아
+        # 스캐너가 유령 견적서 카드로 줍는 일이 없도록 finally에서 정리
+        if work != out_hwp:
+            try:
+                os.remove(work)
+            except OSError:
+                pass
     return report
 
 
 def generate_once(plan: dict, out_hwp: str, out_pdf: str = None,
-                  template: str = TEMPLATE_DEFAULT) -> dict:
+                  template: str = None) -> dict:
     """단발 생성 (자체 한글 인스턴스 생성/종료). 테스트·CLI용."""
+    template = template or _resolve_template_default()
     hwp = make_hwp()
     try:
         return _fill_document(hwp, plan, out_hwp, out_pdf, template,
@@ -408,8 +436,10 @@ def generate_once(plan: dict, out_hwp: str, out_pdf: str = None,
 class HwpWorker:
     """한글 COM 전용 워커 스레드. submit()은 어느 스레드에서든 호출 가능."""
 
-    def __init__(self, template: str = TEMPLATE_DEFAULT):
-        self.template = template
+    def __init__(self, template: str = None):
+        # import 시점 상수가 아니라 생성 시점에 재해석 — 사용자가 커스텀 템플릿을
+        # data 폴더에 적용한 뒤 워커를 재생성하면 즉시 반영된다
+        self.template = template or _resolve_template_default()
         self._jobs = queue.Queue()
         self._session_pids = set()
         self._lock = threading.Lock()

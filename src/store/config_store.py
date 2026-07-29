@@ -9,6 +9,7 @@ import threading
 import time
 
 from src.paths import data_path
+from src.logutil import log as _log
 
 _config_lock = threading.RLock()
 
@@ -100,8 +101,16 @@ def load_config() -> dict:
             try:
                 with open(CONFIG_PATH, "r", encoding="utf-8") as fp:
                     return _merge(DEFAULT_CONFIG, json.load(fp))
-            except Exception:
-                pass
+            except Exception as e:
+                # 손상 config를 조용히 버리면 직후 save_config가 기본값으로
+                # 덮어써 API 키·회사정보가 복구 불가능하게 소실된다 — 백업 보존
+                try:
+                    from datetime import datetime
+                    bad = CONFIG_PATH + ".bad-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+                    os.replace(CONFIG_PATH, bad)
+                    _log(f"config.json 손상({e}) — {os.path.basename(bad)}로 보존 후 기본값 사용")
+                except OSError:
+                    _log(f"config.json 손상({e}) — 백업 실패, 기본값 사용")
         return copy.deepcopy(DEFAULT_CONFIG)
 
 

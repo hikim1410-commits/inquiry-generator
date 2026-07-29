@@ -197,9 +197,13 @@ if _node_src and _os.path.isfile(_node_src):
     _shutil.copy2(_node_src, _os.path.join(_nodejs_dst, "node.exe"))
     # npm 패키지(node_modules/npm) — npm-cli.js를 bundled node로 직접 실행하는 데 필요
     _npm_pkg_src = _os.path.join(_node_home, "node_modules", "npm")
-    if _os.path.isdir(_npm_pkg_src):
-        _shutil.copytree(_npm_pkg_src,
-                         _os.path.join(_nodejs_dst, "node_modules", "npm"))
+    if not _os.path.isdir(_npm_pkg_src):
+        # 조용히 건너뛰면 npm 없는 번들이 출고돼 사용자 PC에서 kordoc 설치가
+        # 영원히 실패한다(첨부 변환 전면 불능) — 빌드를 중단시킨다
+        raise SystemExit(f"[spec] 오류: npm 패키지가 없습니다: {_npm_pkg_src}\n"
+                         "Node.js를 공식 설치본으로 재설치한 뒤 다시 빌드하세요.")
+    _shutil.copytree(_npm_pkg_src,
+                     _os.path.join(_nodejs_dst, "node_modules", "npm"))
     # 셸 심(npm.cmd 등)도 함께 — npm.cmd는 같은 폴더의 node.exe·npm-cli.js를 찾는다
     for _shim in ("npm", "npm.cmd", "npm.ps1", "npx", "npx.cmd"):
         _s = _os.path.join(_node_home, _shim)

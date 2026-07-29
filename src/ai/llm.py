@@ -198,6 +198,67 @@ def _key_msg(code, text):
     return (f"API 키 또는 요청 오류 (HTTP {code}). API 키가 올바른지 확인하세요.\n{text[:160]}")
 
 
+# ---------- 비전(이미지→텍스트) ----------
+
+def complete_text(provider, api_key, model, prompt, images=None, timeout=120):
+    """이미지(base64 PNG 목록) + 프롬프트 → 일반 텍스트 응답 {ok, text}.
+
+    스캔 PDF 전사(OCR 폴백)용 — JSON 강제 없음. 세 프로바이더 모두
+    base64 이미지 입력을 지원한다(선행 조사 F007 계열 확인 사실)."""
+    if not api_key:
+        return _err(f"{PROVIDER_LABELS.get(provider, provider)} API 키가 없습니다. 설정에서 입력하세요.")
+    images = images or []
+    try:
+        if provider == "gemini":
+            parts = [{"text": prompt}] + [
+                {"inline_data": {"mime_type": "image/png", "data": b64}} for b64 in images]
+            payload = {"contents": [{"parts": parts}],
+                       "generationConfig": {"temperature": 0.0}}
+            r = requests.post(f"{GEMINI_BASE}/models/{model}:generateContent",
+                              json=payload, timeout=timeout,
+                              headers={"x-goog-api-key": api_key,
+                                       "Content-Type": "application/json"})
+            if r.status_code == 200:
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return {"ok": True, "text": text}
+        elif provider == "openai":
+            content = [{"type": "text", "text": prompt}] + [
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/png;base64,{b64}"}} for b64 in images]
+            payload = {"model": model,
+                       "messages": [{"role": "user", "content": content}]}
+            r = requests.post(f"{OPENAI_BASE}/chat/completions", json=payload,
+                              timeout=timeout,
+                              headers={"Authorization": f"Bearer {api_key}",
+                                       "Content-Type": "application/json"})
+            if r.status_code == 200:
+                return {"ok": True, "text": r.json()["choices"][0]["message"]["content"]}
+        elif provider == "anthropic":
+            content = [{"type": "image",
+                        "source": {"type": "base64", "media_type": "image/png",
+                                   "data": b64}} for b64 in images]
+            content.append({"type": "text", "text": prompt})
+            payload = {"model": model, "max_tokens": 8000,
+                       "messages": [{"role": "user", "content": content}]}
+            r = requests.post(f"{ANTHROPIC_BASE}/messages", json=payload,
+                              timeout=timeout,
+                              headers={"x-api-key": api_key,
+                                       "anthropic-version": ANTHROPIC_VERSION,
+                                       "content-type": "application/json"})
+            if r.status_code == 200:
+                text = next((b.get("text", "") for b in r.json().get("content", [])
+                             if b.get("type") == "text"), "")
+                return {"ok": True, "text": text}
+        else:
+            return _err(f"알 수 없는 AI 프로바이더: {provider}")
+    except requests.Timeout:
+        return _err(f"응답 시간 초과({timeout}초).")
+    except Exception as e:
+        return _err(f"네트워크 오류: {e}")
+    return _err(f"{PROVIDER_LABELS.get(provider, provider)} 오류 (HTTP {r.status_code}): "
+                f"{r.text[:160]}", status=r.status_code)
+
+
 # ---------- 공개 API ----------
 
 _RETRY_STATUS = {429, 500, 502, 503, 529}

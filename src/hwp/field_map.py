@@ -56,20 +56,23 @@ SUPPLIER_FIELD_MAP = {
 }
 
 
-def build_render_plan(doc: dict, result: QuoteResult, company: dict = None) -> RenderPlan:
+def build_render_plan(doc: dict, result: QuoteResult, company: dict = None,
+                      max_labor: int = MAX_LABOR) -> RenderPlan:
     """doc: 문서 정보 dict, result: 계산 결과, company: 설정 공급자 정보 → 필드 값 일체.
 
     doc 키: recipient, quote_no, ref_name, ref_tel, date(ISO),
             service_name, service_period
     company 키: SUPPLIER_FIELD_MAP의 10개 키 → sup_* 셀필드 (빈 값은 공백 1칸)
+    max_labor: 템플릿 인건비 행 수 (커스텀 템플릿 fieldmap 값 주입 — 기본 4)
     """
     warnings = []
+    max_labor = max(1, int(max_labor or MAX_LABOR))
     labor_rows = [r for r in result.labor_rows if r.count > 0]
     exp_rows = [e for e in result.expense_rows if e.name.strip()]
 
-    if len(labor_rows) > MAX_LABOR:
-        warnings.append(f"인건비 직급이 {MAX_LABOR}개를 초과해 앞 {MAX_LABOR}개만 출력합니다.")
-        labor_rows = labor_rows[:MAX_LABOR]
+    if len(labor_rows) > max_labor:
+        warnings.append(f"인건비 직급이 {max_labor}개를 초과해 앞 {max_labor}개만 출력합니다.")
+        labor_rows = labor_rows[:max_labor]
     # 경비는 8개 초과 시 생성 단계에서 표 행을 동적 추가하므로 자르지 않는다.
     # 단, 비정상 입력으로 인한 표 폭주·생성 지연 방지를 위해 안전 상한만 둔다.
     if len(exp_rows) > EXP_HARD_LIMIT:
@@ -84,7 +87,7 @@ def build_render_plan(doc: dict, result: QuoteResult, company: dict = None) -> R
     f["quote_no"] = doc.get("quote_no") or " "
     f["ref_name"] = (" " + doc["ref_name"]) if doc.get("ref_name") else " "
     f["ref_tel"] = (" " + doc["ref_tel"]) if doc.get("ref_tel") else " "
-    f["quote_date"] = _date_kor(doc.get("date", ""))
+    f["quote_date"] = _date_kor(doc.get("date", "")) or " "  # 빈 값 안내문 노출 방지
 
     # ---- 공급자(설정→문서 동적 반영): 담당자·전화·이메일·팩스 ----
     # 템플릿에 sup_* 셀필드가 없으면 PutFieldText는 무시되어 무해(하위호환).

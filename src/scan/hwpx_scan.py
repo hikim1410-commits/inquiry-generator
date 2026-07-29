@@ -86,7 +86,9 @@ def _parse_section0(zf: zipfile.ZipFile, meta: MinutesMeta) -> bool:
             root = ET.parse(fp).getroot()
     except (KeyError, ET.ParseError):
         return False
-    tbl = root.find(f".//{_HP}tbl")
+    # 중첩 표(래퍼 표 안 양식)에서 첫 발견 표가 아닌 최상위 표 기준으로 파싱
+    top = _iter_top_tables(root)
+    tbl = top[0] if top else None
     if tbl is None:
         return False
     meta.business_name = _cell_text(tbl, 1, 1)
@@ -380,5 +382,21 @@ def scan_folder(folder: str) -> list:
         if os.path.exists(jpath):
             meta.editable = True
             meta.json_path = jpath
+            # 커스텀 양식은 셀 좌표가 표준(고정 좌표 파싱)과 달라 값이 뒤섞일 수
+            # 있다 — 생성 시점 데이터(사이드카)가 있으면 그 값을 신뢰한다
+            try:
+                import json
+                with open(jpath, "r", encoding="utf-8") as fp:
+                    d = json.load(fp).get("data") or {}
+                meta.business_name = d.get("business_name") or meta.business_name
+                meta.topic = d.get("meeting_topic") or meta.topic
+                meta.date = d.get("meeting_date") or meta.date
+                meta.place = d.get("meeting_place") or meta.place
+                if d.get("total_count"):
+                    meta.total_count = int(d["total_count"])
+                meta.date_iso = _date_to_iso(meta.date) or meta.date_iso
+                meta.error = ""
+            except Exception:
+                pass
         results.append(meta)
     return results

@@ -41,11 +41,14 @@ class SystemApi:
             return _err(e)
 
     def open_sibling_pdf(self, hwp_path):
-        pdf = os.path.splitext(hwp_path)[0] + ".pdf"
-        if os.path.exists(pdf):
-            os.startfile(pdf)
-            return {"ok": True}
-        return _err("같은 이름의 PDF가 없습니다.")
+        try:
+            pdf = os.path.splitext(hwp_path)[0] + ".pdf"
+            if os.path.exists(pdf):
+                os.startfile(pdf)
+                return {"ok": True}
+            return _err("같은 이름의 PDF가 없습니다.")
+        except Exception as e:
+            return _err(e)
 
     def open_external(self, url):
         """외부 URL을 기본 브라우저로 연다 (웹뷰 이탈 방지)."""
@@ -133,11 +136,45 @@ class SystemApi:
 
             results = convert.convert_many(
                 paths, progress_cb=self._notify_convert_progress)
+            # 스캔(이미지) PDF 폴백 — 텍스트 추출 0자인 PDF는 설정된 LLM 비전으로 전사
+            for idx, r in enumerate(results):
+                if (r.get("error_code") == "empty_output"
+                        and str(r.get("path", "")).lower().endswith(".pdf")):
+                    results[idx] = self._vision_pdf_fallback(r)
             self._notify_convert_progress({"phase": "done"})
             return {"ok": True, "results": results, "installed_now": installed_now}
         except Exception as e:
             _log(f"convert_files 예외: {e}\n{traceback.format_exc()}")
             return _err(e, traceback=traceback.format_exc())
+
+    def _vision_pdf_fallback(self, result: dict) -> dict:
+        """텍스트 레이어 없는(스캔) PDF를 LLM 비전으로 전사해 결과를 교체.
+
+        실패하면 원래 empty_output 결과에 안내만 덧붙여 반환 — 변환 전체를
+        실패시키지 않는다."""
+        path = result.get("path", "")
+        try:
+            provider = cs.get_provider(self.cfg)
+            api_key = cs.get_ai_key(self.cfg, provider)
+            if not api_key:
+                result["error"] = ("스캔(이미지) PDF입니다. 텍스트 추출을 위해 "
+                                   "설정에서 AI API 키를 등록하세요.")
+                return result
+            self._notify_convert_progress(
+                {"phase": "convert", "msg": f"스캔 PDF AI 전사 중: {result.get('name', '')}"})
+            from src.convert.pdf_ocr import extract_scanned_pdf
+            r = extract_scanned_pdf(path, provider, api_key,
+                                    cs.get_ai_model(self.cfg, provider))
+            if r.get("ok"):
+                out = dict(result)
+                out.update(ok=True, markdown=r["markdown"], chars=r["chars"],
+                           error="", error_code="", vision_ocr=True)
+                return out
+            result["error"] = (f"스캔 PDF AI 전사 실패: {r.get('error', '')} "
+                               "(원본: 텍스트 레이어 없음)")
+        except Exception as e:
+            _log(f"스캔 PDF 폴백 예외 [{path}]: {e}")
+        return result
 
     def pick_convert_files(self):
         """변환할 문서 파일 다중 선택 대화상자 (드래그앤드롭 폴백 겸 1급 경로)."""

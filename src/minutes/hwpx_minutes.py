@@ -28,6 +28,7 @@ paraPr ID 매핑:
 """
 import copy
 import os
+import re
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
@@ -107,6 +108,12 @@ def _iter_top_tables(root) -> list:
         return False
 
     return [t for t in all_tbl if not is_nested(t)]
+
+
+def _ensure_sublist(tc):
+    """셀의 subList 반환 — 없으면(병합 잔여 셀 등) 생성해 NoneType 크래시 방지."""
+    sl = tc.find(f'{_HP}subList')
+    return sl if sl is not None else ET.SubElement(tc, f'{_HP}subList')
 
 
 def _set_simple_cell_text(tbl, row, col, text):
@@ -362,7 +369,7 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
         tb5, r5, c5 = _resolve(cells["participants"])
         tc5_1 = _find_cell(tb5, r5, c5) if tb5 is not None else None
         if tc5_1 is not None:
-            sl5 = tc5_1.find(f'{_HP}subList')
+            sl5 = _ensure_sublist(tc5_1)
             for old in sl5.findall(f'{_HP}p'):
                 sl5.remove(old)
             # 참석자가 비어도 빈 문단 1개는 반드시 남긴다. 한글은 문단 0개인
@@ -387,15 +394,15 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
                     'horzpos': '1000', 'horzsize': '31016', 'flags': '2490368',
                 })
 
-        # 4) 총인원 셀
+        # 4) 총인원 셀 — count_text는 PrvText(step 7)와 공유해 두 경로 표기 일치
+        total = data.get("total_count", 0)
+        count_text = f"(총 {total}명)" if total else ""
         tb52, r52, c52 = _resolve(cells["total_count"])
         tc5_2 = _find_cell(tb52, r52, c52) if tb52 is not None else None
         if tc5_2 is not None:
-            sl52 = tc5_2.find(f'{_HP}subList')
+            sl52 = _ensure_sublist(tc5_2)
             for old in sl52.findall(f'{_HP}p'):
                 sl52.remove(old)
-            total = data.get("total_count", 0)
-            count_text = f"(총 {total}명)" if total else ""
             p_cnt = ET.SubElement(sl52, f'{_HP}p', {
                 'id': '0', 'paraPrIDRef': '26', 'styleIDRef': '0',
                 'pageBreak': '0', 'columnBreak': '0', 'merged': '0',
@@ -413,7 +420,7 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
         tb6, r6, c6 = _resolve(cells["content"])
         tc6_1 = _find_cell(tb6, r6, c6) if tb6 is not None else None
         if tc6_1 is not None:
-            sl6 = tc6_1.find(f'{_HP}subList')
+            sl6 = _ensure_sublist(tc6_1)
             old_paras = sl6.findall(f'{_HP}p')
 
             # 사진표 = 내부에 실제 표(tbl)를 가진 문단만. (paraPrIDRef=='28'은 표준 전용
@@ -500,9 +507,9 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
                 "<참석자><" + (participants[0] if participants else ""),
             ]
             if len(participants) > 1:
-                lines.append("\n".join(participants[1:]) + f"><(총 {data.get('total_count', 0)}명)>")
+                lines.append("\n".join(participants[1:]) + f"><{count_text}>")
             else:
-                lines.append(f"><(총 {data.get('total_count', 0)}명)>")
+                lines.append(f"><{count_text}>")
             lines.append("<회의내용>")
             for sec in (data.get("sections") or []):
                 lines.append(sec.get("text", "") if sec.get("type") != "empty" else "")
@@ -511,7 +518,8 @@ def build_minutes(data: dict, template_hwpx: str = None, out_path: str = None,
 
         # 8) HWPX 재패키징 (mimetype STORED 첫번째)
         if out_path is None:
-            topic = data.get("meeting_topic", "회의록")[:20].replace(" ", "_")
+            # 파일명 금지문자(/ : * 등)까지 정제 — zipfile 생성 OSError 방지
+            topic = re.sub(r'[\\/:*?"<>|\s]+', "_", data.get("meeting_topic", "회의록"))[:20]
             date_tag = (data.get("meeting_date") or "")[:10].replace(". ", "").replace(".", "")
             out_path = os.path.join(
                 os.path.dirname(template_hwpx),

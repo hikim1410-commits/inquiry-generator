@@ -45,8 +45,8 @@ class QuoteApi:
                         "source": "json", "editable": True, "json_path": jpath,
                         "mtime": os.path.getmtime(jpath), "error": "",
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log(f"견적 사이드카 읽기 실패({name}): {e}")
             metas.sort(key=lambda m: m.get("mtime", 0), reverse=True)
             return {"ok": True, "folder": folder, "quotes": metas,
                     "stats": self._stats(metas)}
@@ -185,7 +185,7 @@ class QuoteApi:
 
     def delete_quote(self, payload):
         """견적 삭제. 기본은 재편집 데이터(.quote.json)만 제거.
-        also_files=True일 때만 폴더의 실제 .hwp/.pdf 파일까지 삭제."""
+        also_files=True일 때만 폴더의 실제 .hwp/.hwpx/.pdf 파일까지 삭제."""
         try:
             path = (payload.get("path") or "")
             json_path = (payload.get("json_path") or "")
@@ -203,11 +203,9 @@ class QuoteApi:
                 base = None
                 if json_path.endswith(".quote.json"):
                     base = json_path[:-len(".quote.json")]
-                elif path.endswith(".hwp"):
-                    base = path[:-4]
                 elif path:
                     base = os.path.splitext(path)[0]
-                for ext in (".hwp", ".pdf"):
+                for ext in (".hwp", ".hwpx", ".pdf"):
                     f = (base + ext) if base else ""
                     if f and os.path.exists(f):
                         os.remove(f)
@@ -230,7 +228,13 @@ class QuoteApi:
             if not any(r.count > 0 for r in labor):
                 return _err("최소 1개 직급에 인원을 입력하세요.")
             result = calculate(labor, expenses, profit_on, trim)
-            plan = build_render_plan(doc, result, company=self.cfg.get("company"))
+            # 커스텀 템플릿의 인건비 행 수(fieldmap.max_labor)를 플랜에 반영 —
+            # 기본 4로 자르면 6행 템플릿의 5·6행이 영구 공백이 된다
+            from src.hwp.hwp_writer import (_load_fieldmap_for,
+                                            _resolve_template_default)
+            fm = _load_fieldmap_for(_resolve_template_default())
+            plan = build_render_plan(doc, result, company=self.cfg.get("company"),
+                                     max_labor=int(fm.get("max_labor") or 4))
 
             paths = qs.quote_paths(folder, doc.get("service_name", ""),
                                    doc.get("date", ""))
@@ -374,6 +378,7 @@ class QuoteApi:
                 result["fieldmap_path"] = fm_path
                 result["field_map"] = {}
                 result["unmapped"] = []
+                self._activate_template(hwp_path)
                 return result
 
             # 비표준 필드 있음 → 선택된 AI 프로바이더로 매핑 시도
@@ -391,19 +396,43 @@ class QuoteApi:
             # (재스캔 중 일시 오류·쿼터 초과로 좋은 매핑이 유실되는 것 방지)
             if map_r.get("ok") or not load_fieldmap(hwp_path):
                 result["fieldmap_path"] = save_fieldmap(hwp_path, scan, map_r)
+            # 매핑 성공 시에만 활성화 — 매핑 없는 비표준 템플릿을 적용하면
+            # 필드가 채워지지 않은 산출물이 나온다
+            if map_r.get("ok"):
+                self._activate_template(hwp_path)
             return result
         except Exception as e:
             return _err(e, traceback=traceback.format_exc())
 
+    def _activate_template(self, hwp_path: str):
+        """스캔 성공한 템플릿을 실제 생성에 쓰이도록 활성화.
+
+        기존에는 스캔만 하고 생성은 항상 내장 템플릿을 써서, UI가 '적용됨'을
+        표시해도 커스텀 템플릿이 무시되는 결함이 있었다. _resolve_template_default가
+        우선하는 data 폴더 경로로 사본(+fieldmap)을 복사하고 워커를 재생성한다."""
+        import shutil
+        from src.paths import data_path
+        dst = data_path("templates", "견적서_템플릿.hwp")
+        if os.path.abspath(hwp_path).lower() != os.path.abspath(dst).lower():
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(hwp_path, dst)
+            src_fm = os.path.splitext(hwp_path)[0] + ".fieldmap.json"
+            if os.path.exists(src_fm):
+                shutil.copy2(src_fm, os.path.splitext(dst)[0] + ".fieldmap.json")
+        if self._worker:
+            self._worker.shutdown()
+            self._worker = None
+
     def get_active_template(self) -> dict:
         """현재 활성 템플릿 경로 + fieldmap 정보 반환."""
-        from src.hwp.hwp_writer import TEMPLATE_DEFAULT
+        from src.hwp.hwp_writer import _resolve_template_default
         from src.ai.template_mapper import load_fieldmap
-        fm = load_fieldmap(TEMPLATE_DEFAULT)
+        tpl = _resolve_template_default()
+        fm = load_fieldmap(tpl)
         return {
             "ok": True,
-            "template_path": TEMPLATE_DEFAULT,
-            "template_name": os.path.basename(TEMPLATE_DEFAULT),
+            "template_path": tpl,
+            "template_name": os.path.basename(tpl),
             "is_standard": fm.get("is_standard", True) if fm else True,
             "has_fieldmap": bool(fm),
             "max_labor": fm.get("max_labor", 4),

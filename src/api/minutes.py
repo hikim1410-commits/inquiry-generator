@@ -73,12 +73,15 @@ class MinutesApi:
             out_path = payload.get("out_path")
             if not out_path:
                 folder = payload.get("out_folder") or self._doc_folder("minutes")
-                if folder and os.path.isdir(folder):
-                    import re
-                    topic = re.sub(r'[\\/:*?"<>|]', "_", data.get("meeting_topic", "회의록"))[:20]
-                    date_raw = (data.get("meeting_date") or "")[:10]
-                    date_tag = re.sub(r"\D", "", date_raw)[:8]
-                    out_path = os.path.join(folder, f"회의록_{topic}_{date_tag}.hwpx")
+                if not folder or not os.path.isdir(folder):
+                    # 폴더 미지정 시 build_minutes가 템플릿 옆(설치/임시 폴더)에
+                    # 만들어 버리는 것을 차단 — 견적서 generate와 동일 가드
+                    return _err("먼저 작업 폴더를 선택하세요.")
+                import re
+                topic = re.sub(r'[\\/:*?"<>|]', "_", data.get("meeting_topic", "회의록"))[:20]
+                date_raw = (data.get("meeting_date") or "")[:10]
+                date_tag = re.sub(r"\D", "", date_raw)[:8]
+                out_path = os.path.join(folder, f"회의록_{topic}_{date_tag}.hwpx")
 
             tpl = cs.get_minutes_tpl(self.cfg) or None
             # 커스텀 양식이면 AI 분석 cell_map 적용 (없으면 표준 좌표)
@@ -151,8 +154,8 @@ class MinutesApi:
                         "source": "json", "editable": True, "json_path": jpath,
                         "mtime": os.path.getmtime(jpath), "error": "",
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log(f"회의록 사이드카 읽기 실패({name}): {e}")
             metas.sort(key=lambda m: m.get("mtime", 0), reverse=True)
             return {"ok": True, "folder": folder, "minutes": metas,
                     "stats": self._minutes_stats(metas)}

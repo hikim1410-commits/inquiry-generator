@@ -287,3 +287,17 @@ class TestRealKordoc:
         r = kordoc.convert_file(SAMPLE_XLSX)
         assert r["ok"], r.get("error")
         assert r["chars"] > 100
+
+
+# ---- 스캔 PDF 비전 폴백 배선 ----
+
+def test_vision_fallback_without_key_keeps_failure_with_guidance():
+    """AI 키가 없으면 전사 시도 없이 안내 메시지로 교체된 실패 결과를 반환."""
+    from src.api import Api
+    api = Api.__new__(Api)   # __init__(설정 로드) 생략 — cfg만 주입
+    api.cfg = {}
+    res = {"ok": False, "path": "스캔.pdf", "name": "스캔.pdf", "markdown": "",
+           "chars": 0, "error": "empty", "error_code": "empty_output"}
+    out = api._vision_pdf_fallback(dict(res))
+    assert out["ok"] is False
+    assert "API 키" in out["error"]

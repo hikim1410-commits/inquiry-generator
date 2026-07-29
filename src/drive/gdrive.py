@@ -33,6 +33,7 @@ SCOPES = ["https://www.googleapis.com/auth/drive.file"]  # 이 앱이 만든 파
 
 _MIME = {
     ".hwp": "application/x-hwp",
+    ".hwpx": "application/hwp+zip",
     ".pdf": "application/pdf",
     ".json": "application/json",
 }

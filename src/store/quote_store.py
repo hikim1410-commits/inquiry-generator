@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """견적서 JSON 저장/로드 + 파일 명명 규칙.
 
-명명 규칙 (프로젝트 CLAUDE.md): 견적서_{용역명}_{YYMMDD}.hwp/.pdf/.quote.json
+명명 규칙 (프로젝트 CLAUDE.md): 견적서_{용역명}_{YYMMDD}.hwpx/.pdf/.quote.json
+(산출물은 v1.7부터 HWPX 강제 — zip/XML이라 스캔·검증·후처리가 쉬움. 키 이름 "hwp"는
+호출부 호환을 위해 유지)
 """
 import json
 import os
@@ -30,7 +32,7 @@ def quote_paths(folder: str, service_name: str, iso_date: str) -> dict:
     base = base_filename(service_name, iso_date)
     return {
         "base": base,
-        "hwp": os.path.join(folder, base + ".hwp"),
+        "hwp": os.path.join(folder, base + ".hwpx"),
         "pdf": os.path.join(folder, base + ".pdf"),
         "json": os.path.join(folder, base + ".quote.json"),
     }

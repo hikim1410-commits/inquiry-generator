@@ -103,11 +103,16 @@ def build_minutes_prompt(description: str, directive=None) -> str:
 
 def _normalize_minutes(data: dict) -> dict:
     """스키마 강제 + 안전 클램프."""
+    def _one_line(v, limit):
+        # 단일행 슬롯에 개행이 섞이면 HWPX <t>에 raw \n으로 남아 렌더가 깨질 수
+        # 있다(문단 구분은 <p>) — 공백류를 전부 한 칸으로 접는다
+        return " ".join(str(v or "").split())[:limit]
+
     out = {
-        "business_name": str(data.get("business_name") or "").strip()[:80],
-        "meeting_date":  str(data.get("meeting_date")  or "").strip()[:60],
-        "meeting_place": str(data.get("meeting_place") or "").strip()[:60],
-        "meeting_topic": str(data.get("meeting_topic") or "").strip()[:80],
+        "business_name": _one_line(data.get("business_name"), 80),
+        "meeting_date":  _one_line(data.get("meeting_date"), 60),
+        "meeting_place": _one_line(data.get("meeting_place"), 60),
+        "meeting_topic": _one_line(data.get("meeting_topic"), 80),
         "participants":  [],
         "total_count":   0,
         "sections":      [],
