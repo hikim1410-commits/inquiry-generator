@@ -654,7 +654,7 @@ window.__convertProgress = function(info) {
   }
   let msg;
   if (info.phase === 'install') {
-    msg = `kordoc 설치 중... (${info.msg || ''})`;
+    msg = info.msg || 'kordoc 설치 중...';
     _convEase(0, 90, 30000);                 // npm install 실측 약 30초
   } else if (info.msg) {                     // 부가 단계 (스캔 PDF AI 전사 등)
     msg = info.msg;
@@ -1327,7 +1327,36 @@ async function runDiagnose() {
     diagLine('Google Drive', r.drive_connected ? true : 'warn', r.drive_connected ? '연결됨' : '미연결') +
     diagLine('작업 폴더', r.folder_ok ? true : 'warn', r.folder || '미선택') +
     diagLine('Node.js (문서 변환)', r.node ? true : 'warn', r.node ? `${r.node_bundled ? '내장됨' : '설치됨'} (${r.node})` : '런타임 없음') +
-    diagLine('kordoc (변환 도구)', r.kordoc ? true : 'warn', r.kordoc ? `내장됨 (v${r.kordoc})` : '준비 안 됨'));
+    diagLine('kordoc (변환 도구)', r.kordoc ? (r.kordoc_outdated ? 'warn' : true) : 'warn',
+      r.kordoc ? `v${r.kordoc}${r.kordoc_outdated ? ' — 구버전 (설정 > 진단에서 업데이트)' : ''}` : '준비 안 됨'));
+}
+
+/* 변환 엔진(kordoc) 사용자 업데이트 — 앱 재설치 없이 엔진만 최신화.
+   백엔드가 설치 후 샘플 변환으로 검증하고, 실패하면 직전 버전으로 되돌린다. */
+async function updateKordoc() {
+  const btn = $('#btn-kordoc-update'), msg = $('#kordoc-update-msg');
+  btn.disabled = true;
+  btn.textContent = '업데이트 중…';
+  if (msg) msg.textContent = '';
+  let r;
+  try {
+    r = await call('kordoc_update');
+  } finally {
+    if (_convOn) window.__convertProgress({ phase: 'done' });   // 오버레이 정리
+    btn.disabled = false;
+    btn.textContent = '변환 엔진 업데이트';
+  }
+  if (!r || !r.ok) {
+    const e = (r && r.error) || '업데이트 실패';
+    if (msg) msg.textContent = '⚠ ' + e;
+    toast(e, 'err', 6000);
+    return;
+  }
+  const done = r.updated
+    ? `✓ v${r.previous || '없음'} → v${r.version}`
+    : `✓ 이미 최신입니다 (v${r.version})`;
+  if (msg) msg.textContent = done;
+  toast(r.updated ? `변환 엔진을 v${r.version}으로 업데이트했습니다.` : '변환 엔진이 이미 최신입니다.', 'ok', 4000);
 }
 
 async function runHwpTest() {
@@ -2841,6 +2870,7 @@ async function init() {
 
   $('#btn-diag').addEventListener('click', runDiagnose);
   $('#btn-diag-hwp').addEventListener('click', runHwpTest);
+  $('#btn-kordoc-update').addEventListener('click', updateKordoc);
   $('#diag-close').addEventListener('click', closeDiag);
   $('#diag-modal').addEventListener('click', e => { if (e.target.id === 'diag-modal') closeDiag(); });
 

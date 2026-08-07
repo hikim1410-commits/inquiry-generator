@@ -100,6 +100,18 @@ class SystemApi:
         except Exception as e:
             return _err(e)
 
+    def kordoc_update(self):
+        """변환 엔진(kordoc) 최신화 — 앱 재배포 없이 사용자가 직접 실행.
+
+        최신본 설치 후 번들 샘플로 스모크 변환까지 확인하고, 실패하면
+        직전 버전으로 되돌린다. {ok, updated, version, previous?}"""
+        try:
+            from src import convert
+            return convert.update_kordoc(progress_cb=self._notify_convert_progress)
+        except Exception as e:
+            _log(f"kordoc_update 예외: {e}\n{traceback.format_exc()}")
+            return _err(e)
+
     def _notify_convert_progress(self, info: dict):
         """설치/변환 진행 상황을 UI overlay로 통지 (실패해도 변환은 계속)."""
         try:
@@ -233,6 +245,7 @@ class SystemApi:
             info["node_bundled"] = ni.get("bundled", False)
             ki = convert.kordoc_installed()
             info["kordoc"] = ki["version"] if ki["installed"] else False
+            info["kordoc_outdated"] = bool(ki.get("outdated"))
         except Exception:
             info["node"] = None
             info["kordoc"] = None

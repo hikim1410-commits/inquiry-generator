@@ -162,9 +162,11 @@ _shutil.copy(
 )
 
 # kordoc 비내장(최적화) — 무거운 node_modules(수백 MB)는 빌드에 넣지 않는다.
-# 첫 변환 때 ensure_kordoc()가 npm으로 검증된 메이저(kordoc@3) 내 최신본을 받아
-# kordoc-runtime/node_modules 에 설치한다(사용자 PC, 1회). 빌드에는 사용자가
-# Node.js를 따로 설치하지 않아도 되도록 node.exe + npm 도구만 _nodejs/에 동봉한다.
+# 첫 변환 때 ensure_kordoc()가 npm으로 검증된 메이저(kordoc@4) 내 최신본을 받아
+# kordoc-runtime/node_modules 에 설치한다(사용자 PC, 1회). 이후 엔진 갱신은
+# 설정 > 진단 > "변환 엔진 업데이트" 버튼으로 사용자가 직접 한다(앱 재배포 불필요).
+# 빌드에는 사용자가 Node.js를 따로 설치하지 않아도 되도록 node.exe + npm 도구만
+# _nodejs/에 동봉한다.
 # 결과: 배포본이 수백 MB 줄어든다(예: 754MB node_modules 제외).
 _kordoc_dst = _os.path.join(_dist_dir, "kordoc-runtime")
 _nodejs_dst = _os.path.join(_kordoc_dst, "_nodejs")

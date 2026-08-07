@@ -20,13 +20,12 @@ def _fake_proc(returncode=0, stdout="", stderr=""):
                                        stdout=stdout, stderr=stderr)
 
 
-def _install_fake_kordoc(runtime_dir, version="3.0.0"):
-    """런타임 폴더에 가짜 kordoc + pdfjs-dist 설치 흔적 생성."""
+def _install_fake_kordoc(runtime_dir, version="4.7.1"):
+    """런타임 폴더에 가짜 kordoc 설치 흔적 생성."""
     pkg = os.path.join(runtime_dir, "node_modules", "kordoc")
     os.makedirs(pkg, exist_ok=True)
     with open(os.path.join(pkg, "package.json"), "w", encoding="utf-8") as f:
         json.dump({"version": version, "bin": {"kordoc": "./dist/cli.js"}}, f)
-    os.makedirs(os.path.join(runtime_dir, "node_modules", "pdfjs-dist"), exist_ok=True)
 
 
 # ================= 환경 감지 =================
@@ -62,16 +61,15 @@ def test_kordoc_installed_detect(tmp_path, monkeypatch):
     assert not kordoc.kordoc_installed()["installed"]
     _install_fake_kordoc(str(tmp_path))
     ki = kordoc.kordoc_installed()
-    assert ki["installed"] and ki["version"] == "3.0.0"
+    assert ki["installed"] and ki["version"] == "4.7.1" and not ki["outdated"]
 
 
-def test_kordoc_missing_without_pdfjs(tmp_path, monkeypatch):
-    """kordoc만 있고 pdfjs-dist가 없으면 미설치로 판정 (PDF 변환 불능 상태)."""
+def test_kordoc_outdated_detect(tmp_path, monkeypatch):
+    """최소 버전 미만(구버전 v3)은 outdated — 설치는 유효로 본다."""
     monkeypatch.setattr(kordoc, "_runtime_dir", lambda: str(tmp_path))
-    pkg = tmp_path / "node_modules" / "kordoc"
-    pkg.mkdir(parents=True)
-    (pkg / "package.json").write_text('{"version": "3.0.0"}', encoding="utf-8")
-    assert not kordoc.kordoc_installed()["installed"]
+    _install_fake_kordoc(str(tmp_path), version="3.18.1")
+    ki = kordoc.kordoc_installed()
+    assert ki["installed"] and ki["outdated"]
 
 
 # ================= 부트스트랩 =================
@@ -106,6 +104,85 @@ def test_ensure_kordoc_node_missing(monkeypatch, tmp_path):
                                  "ok": False})
     r = kordoc.ensure_kordoc()
     assert not r["ok"] and r["error_code"] == kordoc.STATE_NODE_MISSING
+
+
+def test_ensure_kordoc_upgrade_fails_keeps_old(tmp_path, monkeypatch):
+    """구버전 설치본이 있는데 갱신이 실패하면(오프라인) 기존 버전으로 계속 쓴다."""
+    monkeypatch.setattr(kordoc, "_runtime_dir", lambda: str(tmp_path))
+    _install_fake_kordoc(str(tmp_path), version="3.18.1")
+    monkeypatch.setattr(kordoc, "node_info",
+                        lambda: {"found": True, "path": "node", "version": "v24.0.0",
+                                 "major": 24, "ok": True})
+    monkeypatch.setattr(kordoc, "_npm_install",
+                        lambda spec: {"ok": False, "error": "네트워크 오류",
+                                      "error_code": "install_offline"})
+    r = kordoc.ensure_kordoc()
+    assert r["ok"] and r["version"] == "3.18.1" and r["upgrade_failed"]
+
+
+# ================= 사용자 엔진 업데이트 =================
+
+def _ready_node(monkeypatch):
+    monkeypatch.setattr(kordoc, "node_info",
+                        lambda: {"found": True, "path": "node", "version": "v24.0.0",
+                                 "major": 24, "ok": True})
+
+
+def test_latest_version_parse(tmp_path, monkeypatch):
+    monkeypatch.setattr(kordoc, "_runtime_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(kordoc, "_npm_base_cmd", lambda: ["npm.cmd"])
+    monkeypatch.setattr(kordoc, "_run",
+                        lambda cmd, timeout, cwd=None: _fake_proc(stdout="4.7.1\n"))
+    assert kordoc.latest_version() == {"ok": True, "version": "4.7.1"}
+
+
+def test_update_kordoc_noop_when_latest(tmp_path, monkeypatch):
+    monkeypatch.setattr(kordoc, "_runtime_dir", lambda: str(tmp_path))
+    _install_fake_kordoc(str(tmp_path), version="4.7.1")
+    _ready_node(monkeypatch)
+    monkeypatch.setattr(kordoc, "latest_version",
+                        lambda: {"ok": True, "version": "4.7.1"})
+    monkeypatch.setattr(kordoc, "_npm_install",
+                        lambda spec: pytest.fail("최신인데 재설치를 시도했다"))
+    r = kordoc.update_kordoc()
+    assert r["ok"] and r["updated"] is False and r["version"] == "4.7.1"
+
+
+def test_update_kordoc_rollback_on_smoke_failure(tmp_path, monkeypatch):
+    """새 버전이 변환에 실패하면 직전 버전으로 되돌린다 (엔진 벽돌 방지)."""
+    monkeypatch.setattr(kordoc, "_runtime_dir", lambda: str(tmp_path))
+    _install_fake_kordoc(str(tmp_path), version="4.7.1")
+    _ready_node(monkeypatch)
+    monkeypatch.setattr(kordoc, "latest_version",
+                        lambda: {"ok": True, "version": "5.0.0"})
+    installs = []
+
+    def fake_install(spec):
+        installs.append(spec)
+        _install_fake_kordoc(str(tmp_path),
+                             version="5.0.0" if spec.endswith("latest") else spec.split("@")[-1])
+        return {"ok": True}
+    monkeypatch.setattr(kordoc, "_npm_install", fake_install)
+    monkeypatch.setattr(kordoc, "_smoke_test",
+                        lambda: {"ok": False, "error": "변환에 실패했습니다"})
+    r = kordoc.update_kordoc()
+    assert not r["ok"] and r["version"] == "4.7.1"
+    assert installs == [kordoc.KORDOC_LATEST_SPEC, "kordoc@4.7.1"]
+    assert kordoc.kordoc_installed()["version"] == "4.7.1"
+
+
+def test_update_kordoc_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(kordoc, "_runtime_dir", lambda: str(tmp_path))
+    _install_fake_kordoc(str(tmp_path), version="4.5.0")
+    _ready_node(monkeypatch)
+    monkeypatch.setattr(kordoc, "latest_version",
+                        lambda: {"ok": True, "version": "4.7.1"})
+    monkeypatch.setattr(kordoc, "_npm_install",
+                        lambda spec: (_install_fake_kordoc(str(tmp_path), "4.7.1"),
+                                      {"ok": True})[1])
+    monkeypatch.setattr(kordoc, "_smoke_test", lambda: {"ok": True})
+    r = kordoc.update_kordoc()
+    assert r["ok"] and r["updated"] and r["version"] == "4.7.1" and r["previous"] == "4.5.0"
 
 
 # ================= 변환 =================

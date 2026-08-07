@@ -5,15 +5,18 @@ kordoc(https://github.com/chrisryugj/kordoc)은 HWP/HWPX/PDF/DOCX/XLSX를
 Markdown으로 변환하는 Node.js 도구다. Python에 import할 수 없으므로
 런타임에 exe 옆 kordoc-runtime/ 폴더에 npm으로 1회 설치 후 subprocess로 호출한다.
 
-=== M0 스파이크에서 실측 확정한 CLI 명세 (kordoc@3.0.0, 2026-06-11) ===
-  설치:  npm install --prefix <RUNTIME_DIR> kordoc@3 pdfjs-dist@4
-         ※ pdfjs-dist는 optional peerDependency라 자동 설치되지 않지만
-           없으면 PDF 변환이 "doc.destroy is not a function"으로 실패한다 — 반드시 동반 설치.
+=== 실측 확정한 CLI 명세 (kordoc@4.7.1, 2026-08-07 재검증) ===
+  설치:  npm install --prefix <RUNTIME_DIR> kordoc@4
+         ※ v3에서 필수였던 pdfjs-dist 동반 설치는 v4에서 불필요 — PDF 파서가
+           패키지 안으로 들어와 peerDependency에서 빠졌다(실측: pdfjs 없이 PDF 변환 성공).
   실행:  node <RUNTIME_DIR>/node_modules/kordoc/dist/cli.js <파일> -o <출력.md> --silent
-         (bin 엔트리는 package.json "bin"."kordoc" = ./dist/cli.js)
+         (bin 엔트리는 package.json "bin"."kordoc" = ./dist/cli.js — v3·v4 동일)
   성공:  exit 0, -o 경로에 UTF-8(BOM 없음) md 생성, 이미지는 출력 폴더 옆 images/에 추출
   실패:  exit 1, stderr에 한국어 메시지 (예: "지원하지 않는 파일 형식입니다.")
   경로:  한글·공백 포함 경로 정상 (인자 리스트 + shell=False)
+
+사용자 자체 업데이트: update_kordoc()이 npm 최신본을 받아 설치한 뒤 번들 샘플로
+스모크 변환을 돌리고, 실패하면 직전 버전으로 되돌린다 — 앱 재배포 없이 엔진만 갱신.
 """
 import json
 import os
@@ -28,12 +31,14 @@ from src.paths import data_path
 from src.logutil import log as _log
 
 # ---- 상수 ----
-KORDOC_SPEC = "kordoc@3"          # 검증된 메이저(3) 내 최신본을 매번 받음
-                                  # (CLI 명세가 v3 기준이라 메이저는 고정; 메이저를
-                                  #  올리려면 CLI 호출 명세 재검증 후 변경할 것)
-PDFJS_SPEC = "pdfjs-dist@4"       # kordoc PDF 변환 필수 peer dep
+KORDOC_SPEC = "kordoc@4"          # 자동 설치 스펙 — CLI 명세를 실측 검증한 메이저(4)
+                                  # 내 최신본. 메이저를 올리려면 CLI 호출 명세를
+                                  # 재검증하거나, 사용자가 update_kordoc()으로 올린다.
+KORDOC_LATEST_SPEC = "kordoc@latest"  # 사용자 수동 업데이트(스모크 검증 + 롤백 동반)
+KORDOC_MIN_VERSION = (4, 0, 0)    # 이보다 낮은 설치본은 구버전 → 변환 시 갱신 시도
 NODE_MIN_MAJOR = 18
 INSTALL_TIMEOUT = 300             # npm install (초)
+VIEW_TIMEOUT = 60                 # npm view (초)
 CONVERT_TIMEOUT = 120             # 파일당 변환 (초)
 
 SUPPORTED_EXTS = {".hwp", ".hwpx", ".hml", ".pdf", ".docx", ".xlsx", ".xls"}
@@ -139,19 +144,27 @@ def _kordoc_pkg_dir() -> str:
     return os.path.join(_runtime_dir(), "node_modules", "kordoc")
 
 
+def _ver_tuple(ver: str) -> tuple:
+    """'4.7.1' → (4, 7, 1). 파싱 실패 시 (0,)."""
+    nums = re.findall(r"\d+", ver or "")
+    return tuple(int(n) for n in nums[:3]) or (0,)
+
+
 def kordoc_installed() -> dict:
-    """{installed, version} — subprocess 없이 package.json 존재로 판정.
-    pdfjs-dist는 PDF 변환의 필수 peer dep이라 함께 있어야 설치 완료로 본다."""
+    """{installed, version, outdated} — subprocess 없이 package.json 존재로 판정.
+
+    outdated=True는 '동작은 하지만 낡은 설치본' — 변환 시 갱신을 시도하되,
+    갱신에 실패해도(오프라인 등) 기존 설치본으로 계속 쓴다."""
     pkg_json = os.path.join(_kordoc_pkg_dir(), "package.json")
-    pdfjs_dir = os.path.join(_runtime_dir(), "node_modules", "pdfjs-dist")
-    if not os.path.isfile(pkg_json) or not os.path.isdir(pdfjs_dir):
-        return {"installed": False, "version": ""}
+    if not os.path.isfile(pkg_json):
+        return {"installed": False, "version": "", "outdated": False}
     try:
         with open(pkg_json, encoding="utf-8") as f:
             ver = json.load(f).get("version", "")
     except Exception:
-        return {"installed": False, "version": ""}
-    return {"installed": True, "version": ver}
+        return {"installed": False, "version": "", "outdated": False}
+    return {"installed": True, "version": ver,
+            "outdated": _ver_tuple(ver) < KORDOC_MIN_VERSION}
 
 
 def status() -> dict:
@@ -169,59 +182,80 @@ def status() -> dict:
 
 # ================= 부트스트랩 =================
 
-def ensure_kordoc(progress_cb=None) -> dict:
-    """kordoc 미설치 시 1회 설치. 동시 호출은 Lock으로 직렬화."""
-    with _install_lock:
-        if kordoc_installed()["installed"]:
-            return {"ok": True, "version": kordoc_installed()["version"],
-                    "installed_now": False}
-        ni = node_info()
-        if not ni["found"]:
-            return {"ok": False, "error": "Node.js가 설치되어 있지 않습니다.",
-                    "error_code": STATE_NODE_MISSING}
-        if not ni["ok"]:
+def _check_node() -> dict:
+    """Node 런타임 사용 가능 여부 → 문제 없으면 {"ok": True}."""
+    ni = node_info()
+    if not ni["found"]:
+        return {"ok": False, "error": "Node.js가 설치되어 있지 않습니다.",
+                "error_code": STATE_NODE_MISSING}
+    if not ni["ok"]:
+        return {"ok": False,
+                "error": f"Node.js 버전이 낮습니다 (v{NODE_MIN_MAJOR} 이상 필요, 현재 {ni['version']}).",
+                "error_code": STATE_NODE_TOO_OLD}
+    return {"ok": True}
+
+
+def _npm_install(spec: str) -> dict:
+    """npm install <spec> → {ok, error?, error_code?}. 설치 위치는 런타임 폴더."""
+    base = _npm_base_cmd()
+    if not base:
+        return {"ok": False, "error": "npm을 찾을 수 없습니다 (Node.js 재설치 필요).",
+                "error_code": "install_failed"}
+    rt = _runtime_dir()
+    os.makedirs(rt, exist_ok=True)
+    cmd = base + ["install", "--prefix", rt, spec,
+                  "--no-audit", "--no-fund", "--loglevel=error"]
+    _log(f"kordoc 설치 시작: {' '.join(cmd)}")
+    t0 = time.time()
+    try:
+        r = _run(cmd, timeout=INSTALL_TIMEOUT, cwd=rt)
+    except subprocess.TimeoutExpired:
+        _log("kordoc 설치 타임아웃")
+        return {"ok": False, "error": "변환 도구 설치 시간이 초과되었습니다.",
+                "error_code": "install_failed"}
+    except Exception as e:
+        _log(f"kordoc 설치 예외: {e}")
+        return {"ok": False, "error": f"변환 도구 설치에 실패했습니다: {e}",
+                "error_code": "install_failed"}
+
+    if r.returncode != 0 or not kordoc_installed()["installed"]:
+        err = (r.stderr or r.stdout or "").strip()[-500:]
+        _log(f"kordoc 설치 실패 (exit {r.returncode}): {err}")
+        offline_marks = ("ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED",
+                         "network", "offline")
+        if any(mk in err for mk in offline_marks):
             return {"ok": False,
-                    "error": f"Node.js 버전이 낮습니다 (v{NODE_MIN_MAJOR} 이상 필요, 현재 {ni['version']}).",
-                    "error_code": STATE_NODE_TOO_OLD}
-        npm = npm_path()
-        if not npm:
-            return {"ok": False, "error": "npm을 찾을 수 없습니다 (Node.js 재설치 필요).",
-                    "error_code": "install_failed"}
+                    "error": "인터넷 연결을 확인하세요. 변환 도구 설치에는 네트워크가 필요합니다.",
+                    "error_code": "install_offline"}
+        return {"ok": False, "error": f"변환 도구 설치에 실패했습니다: {err}",
+                "error_code": "install_failed"}
+    _log(f"kordoc {kordoc_installed()['version']} 설치 완료 ({time.time() - t0:.0f}초)")
+    return {"ok": True}
+
+
+def ensure_kordoc(progress_cb=None) -> dict:
+    """kordoc 미설치 시 1회 설치, 구버전이면 갱신 시도. 동시 호출은 Lock으로 직렬화."""
+    with _install_lock:
+        cur = kordoc_installed()
+        if cur["installed"] and not cur["outdated"]:
+            return {"ok": True, "version": cur["version"], "installed_now": False}
+        chk = _check_node()
+        if not chk["ok"]:
+            return chk
 
         if progress_cb:
-            progress_cb({"phase": "install", "msg": "kordoc 설치 중..."})
-        rt = _runtime_dir()
-        os.makedirs(rt, exist_ok=True)
-        cmd = _npm_base_cmd() + ["install", "--prefix", rt, KORDOC_SPEC,
-               PDFJS_SPEC, "--no-audit", "--no-fund", "--loglevel=error"]
-        _log(f"kordoc 설치 시작: {' '.join(cmd)}")
-        t0 = time.time()
-        try:
-            r = _run(cmd, timeout=INSTALL_TIMEOUT, cwd=rt)
-        except subprocess.TimeoutExpired:
-            _log("kordoc 설치 타임아웃")
-            return {"ok": False, "error": "변환 도구 설치 시간이 초과되었습니다.",
-                    "error_code": "install_failed"}
-        except Exception as e:
-            _log(f"kordoc 설치 예외: {e}")
-            return {"ok": False, "error": f"변환 도구 설치에 실패했습니다: {e}",
-                    "error_code": "install_failed"}
-
-        if r.returncode != 0 or not kordoc_installed()["installed"]:
-            err = (r.stderr or r.stdout or "").strip()[-500:]
-            _log(f"kordoc 설치 실패 (exit {r.returncode}): {err}")
-            offline_marks = ("ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED",
-                             "network", "offline")
-            if any(mk in err for mk in offline_marks):
-                return {"ok": False,
-                        "error": "인터넷 연결을 확인하세요. 변환 도구 첫 설치에는 네트워크가 필요합니다.",
-                        "error_code": "install_offline"}
-            return {"ok": False, "error": f"변환 도구 설치에 실패했습니다: {err}",
-                    "error_code": "install_failed"}
-
-        ver = kordoc_installed()["version"]
-        _log(f"kordoc {ver} 설치 완료 ({time.time() - t0:.0f}초)")
-        return {"ok": True, "version": ver, "installed_now": True}
+            progress_cb({"phase": "install",
+                         "msg": "변환 엔진 갱신 중..." if cur["installed"] else "kordoc 설치 중..."})
+        r = _npm_install(KORDOC_SPEC)
+        if not r["ok"]:
+            # 구버전이라도 이미 설치돼 있으면 그대로 쓴다 (오프라인에서 변환 막지 않음)
+            if cur["installed"]:
+                _log(f"kordoc 갱신 실패 — 기존 v{cur['version']}로 계속: {r.get('error', '')}")
+                return {"ok": True, "version": cur["version"], "installed_now": False,
+                        "upgrade_failed": True}
+            return r
+        return {"ok": True, "version": kordoc_installed()["version"],
+                "installed_now": True}
 
 
 def _kordoc_cli() -> list:
@@ -334,6 +368,18 @@ def convert_file(path: str) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _smoke_test() -> dict:
+    """번들 샘플 문서 1건 변환 — 엔진 교체 후 CLI 명세 호환 확인용.
+
+    샘플이 없으면(개발 중 템플릿 미배치) 검증을 건너뛴다."""
+    from src.paths import resource_path
+    sample = resource_path("templates", "회의록_양식.hwpx")
+    if not os.path.isfile(sample):
+        return {"ok": True, "skipped": True}
+    r = convert_file(sample)
+    return {"ok": bool(r.get("ok")), "error": r.get("error", "")}
+
+
 def convert_many(paths, progress_cb=None) -> list:
     """순차 변환. progress_cb({"phase":"convert","i","total","name"})로 진행 통지."""
     results = []
@@ -344,3 +390,73 @@ def convert_many(paths, progress_cb=None) -> list:
                          "name": os.path.basename(p or "")})
         results.append(convert_file(p))
     return results
+
+
+# ================= 사용자 주도 엔진 업데이트 =================
+
+def latest_version() -> dict:
+    """npm 레지스트리의 kordoc 최신 버전 조회 → {ok, version} / {ok:False, error}."""
+    base = _npm_base_cmd()
+    if not base:
+        return {"ok": False, "error": "npm을 찾을 수 없습니다 (Node.js 재설치 필요)."}
+    rt = _runtime_dir()
+    try:
+        r = _run(base + ["view", "kordoc", "version"], timeout=VIEW_TIMEOUT,
+                 cwd=rt if os.path.isdir(rt) else None)
+    except Exception as e:
+        return {"ok": False, "error": f"최신 버전 확인 실패: {e}"}
+    ver = (r.stdout or "").strip().splitlines()[-1:] or [""]
+    if r.returncode != 0 or not re.match(r"^\d+\.\d+\.\d+", ver[0]):
+        return {"ok": False,
+                "error": "최신 버전을 확인하지 못했습니다 (인터넷 연결을 확인하세요)."}
+    return {"ok": True, "version": ver[0]}
+
+
+def update_kordoc(progress_cb=None) -> dict:
+    """사용자 버튼용 엔진 업데이트 — 최신본 설치 → 스모크 변환 → 실패 시 롤백.
+
+    반환 {ok, updated, version, previous?} / {ok:False, error, version?}
+    메이저가 올라가 CLI 명세가 바뀌면 변환이 통째로 죽으므로, 설치 직후
+    번들 샘플을 실제로 변환해 보고 실패하면 직전 버전으로 되돌린다."""
+    with _install_lock:
+        chk = _check_node()
+        if not chk["ok"]:
+            return chk
+        before = kordoc_installed()
+
+        if progress_cb:
+            progress_cb({"phase": "install", "msg": "최신 버전 확인 중..."})
+        lat = latest_version()
+        if not lat["ok"]:
+            return {"ok": False, "error": lat["error"]}
+        if before["installed"] and before["version"] == lat["version"]:
+            return {"ok": True, "updated": False, "version": before["version"],
+                    "latest": lat["version"]}
+
+        if progress_cb:
+            progress_cb({"phase": "install", "msg": f"변환 엔진 v{lat['version']} 설치 중..."})
+        r = _npm_install(KORDOC_LATEST_SPEC)
+        if not r["ok"]:
+            return {"ok": False, "error": r["error"],
+                    "error_code": r.get("error_code", ""),
+                    "version": before["version"]}
+
+        after = kordoc_installed()["version"]
+        if progress_cb:
+            progress_cb({"phase": "install", "msg": "새 엔진 동작 확인 중..."})
+        smoke = _smoke_test()
+        if not smoke["ok"]:
+            _log(f"kordoc v{after} 스모크 실패 — 롤백: {smoke.get('error', '')}")
+            if before["installed"]:
+                back = _npm_install(f"kordoc@{before['version']}")
+                if back["ok"]:
+                    return {"ok": False, "version": before["version"],
+                            "error": (f"새 버전 v{after}이 정상 동작하지 않아 "
+                                      f"v{before['version']}으로 되돌렸습니다.")}
+            return {"ok": False, "version": after,
+                    "error": (f"새 버전 v{after} 설치 후 변환 검증에 실패했습니다: "
+                              f"{smoke.get('error', '원인 불명')}")}
+
+        _log(f"kordoc 업데이트 완료: v{before['version'] or '없음'} → v{after}")
+        return {"ok": True, "updated": True, "version": after,
+                "previous": before["version"]}

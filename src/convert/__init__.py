@@ -5,7 +5,7 @@
 """
 from src.convert.kordoc import (  # noqa: F401
     status, ensure_kordoc, convert_file, convert_many,
-    node_info, kordoc_installed,
+    node_info, kordoc_installed, latest_version, update_kordoc,
     SUPPORTED_EXTS, PASSTHROUGH_EXTS,
     STATE_READY, STATE_NODE_MISSING, STATE_NODE_TOO_OLD, STATE_KORDOC_MISSING,
 )
