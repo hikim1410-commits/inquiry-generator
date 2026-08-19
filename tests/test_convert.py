@@ -7,7 +7,9 @@ import subprocess
 import pytest
 
 from src.convert import kordoc
-from src.convert.attach import merge_attachments
+from src.convert.attach import (
+    merge_attachments, MAX_ATTACH_TOTAL, MAX_TRANSCRIPT_TOTAL,
+)
 
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -301,6 +303,44 @@ def test_convert_many_progress(tmp_path, monkeypatch):
     assert [(s["i"], s["total"]) for s in seen] == [(1, 2), (2, 2)]
 
 
+def test_audio_exts_match_prd():
+    assert kordoc.AUDIO_EXTS == {
+        ".m4a", ".mp3", ".wav", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".mov",
+    }
+
+
+def test_audio_exts_route_to_stt(tmp_path):
+    """음성·영상 9종 + 대문자 .M4A 는 변환하지 않고 STT 라우팅 신호를 낸다."""
+    exts = [".m4a", ".mp3", ".wav", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".mov",
+            ".M4A"]
+    for ext in exts:
+        p = tmp_path / f"녹음{ext}"
+        p.write_bytes(b"\x00")
+        r = kordoc.convert_file(str(p))
+        assert r["ok"] is False
+        assert r["error_code"] == "needs_stt", ext
+        assert "STT" in r["error"] or "전사" in r["error"]
+
+
+def test_non_audio_ext_keeps_existing_route(tmp_path):
+    """음성이 아닌 확장자는 종전 경로(unsupported / passthrough)를 유지한다."""
+    z = tmp_path / "데이터.zip"
+    z.write_bytes(b"PK")
+    r = kordoc.convert_file(str(z))
+    assert not r["ok"] and r["error_code"] == "unsupported"
+
+    t = tmp_path / "메모.txt"
+    t.write_text("본문", encoding="utf-8")
+    r = kordoc.convert_file(str(t))
+    assert r["ok"] and "본문" in r["markdown"]
+    assert r.get("error_code") != "needs_stt"
+
+    m = tmp_path / "메모.md"
+    m.write_text("# 메모", encoding="utf-8")
+    r = kordoc.convert_file(str(m))
+    assert r["ok"] and r.get("error_code") != "needs_stt"
+
+
 # ================= 첨부 병합 =================
 
 def test_merge_attachments_basic():
@@ -339,6 +379,39 @@ def test_merge_attachments_invalid_items():
 def test_merge_attachments_no_desc():
     merged, _ = merge_attachments("", [{"name": "a.txt", "markdown": "본문"}])
     assert merged.startswith("===== 첨부 문서 1")
+
+
+def test_merge_attachments_no_kind_keeps_document_cap():
+    """kind 없는 기존 호출은 문서 상한(3만 자)을 그대로 쓴다."""
+    md = "가" * (MAX_ATTACH_TOTAL + 1)
+    merged, warns = merge_attachments("설명", [{"name": "a.hwp", "markdown": md}])
+    assert "[... 분량 초과로 이하" in merged
+    assert len(warns) == 1 and "절단" in warns[0]
+    assert f"{MAX_ATTACH_TOTAL:,}자" in warns[0]
+    assert "후반부" not in warns[0]
+
+
+def test_merge_attachments_transcript_fits_cap():
+    """전사본 kind 는 120,000자까지 잘리지 않는다."""
+    md = "가" * MAX_TRANSCRIPT_TOTAL
+    merged, warns = merge_attachments("", [
+        {"name": "회의.txt", "markdown": md, "kind": "transcript"},
+    ])
+    assert "[... 분량 초과로 이하" not in merged
+    assert md in merged
+    assert warns == []
+
+
+def test_merge_attachments_transcript_overflow_warns_tail():
+    """전사본이 상한을 넘으면 후반부 잘림을 알리는 경고가 나온다."""
+    md = "가" * (MAX_TRANSCRIPT_TOTAL + 50)
+    merged, warns = merge_attachments("", [
+        {"name": "회의.txt", "markdown": md, "kind": "transcript"},
+    ])
+    assert "[... 분량 초과로 이하" in merged
+    assert len(warns) == 1
+    assert "후반부" in warns[0]
+    assert f"{MAX_TRANSCRIPT_TOTAL:,}자" in warns[0]
 
 
 # ================= 통합 (-m node: 실제 kordoc 설치+변환) =================

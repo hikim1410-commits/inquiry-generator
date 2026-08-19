@@ -34,6 +34,7 @@ nul
 # STT 파일럿 (임시 — 게이트 판정 후 제거)
 .venv-stt/
 .stt-pilot-cache/
+stt-models/
 *.pilot.txt
 scripts/stt_pilot_stats.json
 *.bak-*

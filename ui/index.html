@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>내비온 견적서 생성기</title>
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="app.css?v=wide1">
 </head>
 <body>
 <div id="app">
@@ -258,7 +258,8 @@
       </header>
 
       <!-- 1단계: 입력 -->
-      <div id="minutes-step1" class="minutes-form">
+      <div id="minutes-step1" class="minutes-form minutes-compose">
+        <div class="mn-compose-split">
         <div class="card form-card">
           <h3>회의 기본 정보 <span class="h-sub">AI 힌트용 (미입력 가능)</span></h3>
           <div class="form-grid">
@@ -268,22 +269,115 @@
         </div>
 
         <div class="card form-card">
+          <h3>파일 첨부 <span class="h-sub">녹음 파일·전사본·메모·자료 (TXT는 Node.js 없이도 동작)</span></h3>
+          <div id="mn-node-banner" class="node-banner hidden">
+            ⚠ 문서 변환 런타임을 준비하는 중입니다. TXT·MD만 사용 가능합니다.
+          </div>
+          <div id="mn-stt-banner" class="node-banner hidden">
+            <span id="mn-stt-banner-text">음성 전사 엔진이 준비되지 않았습니다.</span>
+            <button id="mn-stt-install" class="btn btn-ghost btn-mini" type="button">설치</button>
+          </div>
+          <div id="minutes-dropzone">
+            <div class="dz-icon">📎</div>
+            <div class="dz-label"><b>녹음 파일·전사본·메모를 여기에 드롭</b>하거나<br>버튼으로 선택하세요</div>
+            <div class="dz-sub">녹음 M4A·MP3·WAV·MP4 / 문서 TXT·MD·HWP·PDF·DOCX</div>
+            <button id="mn-pick-files" class="btn btn-ghost dz-pick-btn" type="button">파일 선택…</button>
+          </div>
+          <div id="mn-chips" class="ai-chips hidden"></div>
+          <div id="mn-stt-progress" class="hidden">
+            <div class="mn-stt-progress-row">
+              <span id="mn-stt-phase">전사 준비</span>
+              <span id="mn-stt-pct">0%</span>
+            </div>
+            <div class="mn-stt-bar"><div id="mn-stt-bar-fill"></div></div>
+            <div class="mn-stt-progress-row">
+              <span id="mn-stt-progress-sub" class="h-sub"></span>
+              <button id="mn-stt-cancel" class="btn btn-ghost btn-mini" type="button">취소</button>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <div class="card form-card">
           <h3>회의 메모 <span class="h-sub">녹음 전사본, 요점 등을 붙여넣으세요</span></h3>
           <textarea id="mn-memo" rows="6" placeholder="회의에서 논의된 내용을 자유롭게 입력하세요.&#10;녹음 전사본을 그대로 붙여넣어도 됩니다.&#10;파일로 첨부하려면 아래 드롭존을 이용하세요."></textarea>
         </div>
 
-        <div class="card form-card">
-          <h3>파일 첨부 <span class="h-sub">녹음 전사본·메모·자료 (TXT는 Node.js 없이도 동작)</span></h3>
-          <div id="mn-node-banner" class="node-banner hidden">
-            ⚠ 문서 변환 런타임을 준비하는 중입니다. TXT·MD만 사용 가능합니다.
+        <div id="mn-note" class="mn-note hidden">
+          <!-- 헤더 -->
+          <div class="note-head">
+            <div class="note-head-main">
+              <div id="note-title" class="note-title" contenteditable="true" spellcheck="false"></div>
+              <div id="note-meta" class="note-meta"></div>
+            </div>
+            <div class="note-actions">
+              <button id="note-copy" class="btn btn-ghost btn-mini" type="button">복사</button>
+              <button id="note-download" class="btn btn-ghost btn-mini" type="button">저장</button>
+            </div>
           </div>
-          <div id="minutes-dropzone" class="dz-disabled">
-            <div class="dz-icon">📎</div>
-            <div class="dz-label"><b>녹음 전사본·메모 파일을 여기에 드롭</b>하거나<br>버튼으로 선택하세요</div>
-            <div class="dz-sub">TXT·MD는 Node.js 없이 동작 / HWP·PDF·DOCX·XLSX도 지원</div>
-            <button id="mn-pick-files" class="btn btn-ghost dz-pick-btn" type="button">파일 선택…</button>
+
+          <div class="note-body">
+            <aside id="note-rail" class="note-rail">
+              <div class="note-section-title">화자</div>
+              <div id="note-speakers" class="note-speakers"></div>
+              <div class="note-section-title">발화 비중</div>
+              <div id="note-share" class="note-share"></div>
+            </aside>
+
+            <div class="note-main">
+              <div class="note-section">
+                <div class="note-section-title">주요 키워드</div>
+                <div id="note-keywords" class="note-keywords"></div>
+              </div>
+
+              <div class="note-section">
+                <div class="note-section-title">
+                  AI 요약
+                  <span class="note-sum-btns">
+                    <button id="note-sum-edit" class="btn btn-ghost btn-mini hidden" type="button">편집</button>
+                    <button id="note-sum-run" class="btn btn-violet btn-mini" type="button">✦ 요약 생성</button>
+                  </span>
+                </div>
+                <div id="note-notice" class="update-banner hidden">
+                  <span>요약 생성 시 전사본이 설정된 AI 서비스(외부)로 전송됩니다. 대외비 회의는 전송 여부를 먼저 판단하세요.</span>
+                  <button id="note-notice-close" class="btn btn-ghost btn-mini" type="button">확인</button>
+                </div>
+                <div id="note-sum-status" class="h-sub hidden"></div>
+                <div id="note-summary" class="note-summary"></div>
+              </div>
+
+              <div class="note-section">
+                <div class="note-section-title">
+                  음성 기록
+                  <button id="note-edit-toggle" class="btn btn-ghost btn-mini" type="button">편집</button>
+                </div>
+                <div id="note-transcript" class="note-transcript"></div>
+              </div>
+            </div>
+
+            <aside class="note-side">
+              <div class="note-section-title">메모·요약</div>
+              <textarea id="note-memo" class="note-memo" placeholder="메모 추가하기"></textarea>
+            </aside>
           </div>
-          <div id="mn-chips" class="ai-chips hidden"></div>
+
+          <!-- 하단 플레이어 -->
+          <div id="note-player" class="note-player">
+            <span id="np-cur" class="np-time">00:00</span>
+            <input id="np-seek" class="np-seek" type="range" min="0" max="1000" value="0" step="1">
+            <span id="np-total" class="np-time">00:00</span>
+            <div class="np-controls">
+              <button id="np-rate" class="np-btn" type="button">1x</button>
+              <button id="np-back5" class="np-btn" type="button" title="5초 뒤로">⟲5</button>
+              <button id="np-play" class="np-btn np-play" type="button" title="재생">▶</button>
+              <button id="np-fwd5" class="np-btn" type="button" title="5초 앞으로">5⟳</button>
+            </div>
+            <audio id="np-audio" preload="metadata"></audio>
+          </div>
+
+          <div class="note-foot">
+            <button id="mn-stt-to-minutes" class="btn btn-violet" type="button">이 전사본으로 회의록 초안 만들기</button>
+          </div>
         </div>
 
         <div id="mn-status" class="ai-status"></div>
@@ -838,6 +932,6 @@
 <div id="overlay" class="overlay hidden"><div class="spinner"></div><div id="overlay-msg">처리 중...</div><div id="overlay-bar" class="hidden"><div id="overlay-bar-fill"></div></div><div id="overlay-pct" class="hidden"></div></div>
 <div id="toast-wrap"></div>
 
-<script src="app.js"></script>
+<script src="app.js?v=wide1"></script>
 </body>
 </html>

@@ -19,8 +19,11 @@ from .settings import SettingsApi
 from .quote import QuoteApi
 from .minutes import MinutesApi
 from .receipt import ReceiptApi
+from .stt import SttApi
+from .note import NoteApi
 from .system import SystemApi
 
 
-class Api(SettingsApi, QuoteApi, MinutesApi, ReceiptApi, SystemApi, ApiCore):
+class Api(SettingsApi, QuoteApi, MinutesApi, ReceiptApi, SttApi, NoteApi,
+          SystemApi, ApiCore):
     """도메인 믹스인 조립체 — 메서드 구현은 각 도메인 모듈 참조."""

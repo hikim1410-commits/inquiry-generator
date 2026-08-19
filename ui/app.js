@@ -555,7 +555,12 @@ function setDropzoneState(dzSel, bannerSel, r) {
 async function refreshConvertStatus() {
   const r = await call('convert_status');
   setDropzoneState('#ai-dropzone', '#ai-node-banner', r);
-  setDropzoneState('#minutes-dropzone', '#mn-node-banner', r);
+  // 회의록 드롭존은 음성 STT가 kordoc(Node) 없이도 동작해야 하므로 비활성화하지 않는다.
+  // 문서 변환 안내는 배너만 띄운다.
+  const mnBanner = $('#mn-node-banner');
+  if (mnBanner) mnBanner.classList.toggle('hidden', !(r && r.state === 'node_missing'));
+  const mnDz = $('#minutes-dropzone');
+  if (mnDz) mnDz.classList.remove('dz-disabled');
   // #receipt-dropzone 은 kordoc/node 게이트(setDropzoneState)를 적용하지 않는다
 }
 
@@ -1809,8 +1814,1119 @@ let _mnGenConfirmData = null; // 미매핑 확인 모달에 보류 중인 생성
 
 /* 드롭존 상태·배선·변환·칩 렌더는 견적 AI와 공용 헬퍼 사용
    (setDropzoneState / wireDropzone / convertInto / renderChips) */
-const handleMinutesDroppedPaths = (paths) => convertInto(paths, minutesAttachments, renderMinutesChips);
+const STT_EXTS = {'.m4a':1,'.mp3':1,'.wav':1,'.aac':1,'.flac':1,'.ogg':1,'.opus':1,'.mp4':1,'.mov':1};
+function isSttPath(p) {
+  const s = String(p || '').toLowerCase().replace(/\\/g, '/');
+  const i = s.lastIndexOf('.');
+  if (i < 0) return false;
+  return !!STT_EXTS[s.slice(i)];
+}
+const handleMinutesDroppedPaths = (paths) => routeMinutesDroppedPaths(paths);
 const renderMinutesChips = () => renderChips('#mn-chips', minutesAttachments);
+
+let _sttPoll = null;
+let _sttMapTimer = null;
+let _noteMetaTimer = null;
+let _noteSegTextTimer = null;
+let _noteUiWired = false;
+let _noteHydrating = false;
+let _noteEditing = false;
+let _noteFollow = true;
+let _noteIgnoreScroll = false;
+let _noteSeeking = false;
+let _noteHasAudio = false;
+let _noteDuration = 0;
+let _noteRateIdx = 0;
+let _noteKeywords = [];
+let _noteSummary = null;
+let _noteSumEditing = false;
+let _noteSumRunning = false;
+let _noteMapping = {};
+let _noteSpeakerOrder = [];
+let _noteSegs = [];
+let _noteRows = [];
+let _segStarts = [];
+let _activeIdx = -1;
+const NOTE_RATES = [1, 1.25, 1.5, 2];
+// 스크립트가 body 끝에 있으므로 이 시점에 마크업이 있다. W2 샘플이 먼저 보이지 않게 닫는다.
+if ($('#mn-note')) $('#mn-note').classList.add('hidden');
+
+async function routeMinutesDroppedPaths(paths) {
+  if (!paths || !paths.length) return;
+  const audio = [], docs = [];
+  paths.forEach(p => { if (isSttPath(p)) audio.push(p); else docs.push(p); });
+  if (audio.length) await startMinutesStt(audio);
+  if (docs.length) await convertInto(docs, minutesAttachments, renderMinutesChips);
+}
+
+function showMnSttProgress(on) {
+  const box = $('#mn-stt-progress');
+  if (box) box.classList.toggle('hidden', !on);
+}
+
+function renderSttProgress(st) {
+  if (!st || !st.ok) return;
+  const running = !!st.running || st.phase === 'install';
+  if (running || st.phase === 'cancelled') showMnSttProgress(true);
+  const phase = $('#mn-stt-phase');
+  const pctEl = $('#mn-stt-pct');
+  const fill = $('#mn-stt-bar-fill');
+  const sub = $('#mn-stt-progress-sub');
+  if (phase) phase.textContent = st.label || st.phase || '';
+  const pct = (st.pct == null ? '0' : String(st.pct)) + '%';
+  if (pctEl) pctEl.textContent = pct;
+  if (fill) fill.style.width = pct;
+  const bits = [];
+  if (st.current) bits.push(st.current);
+  if (st.done_ts && st.total_ts) bits.push(st.done_ts + ' / ' + st.total_ts);
+  if (sub) sub.textContent = bits.join(' — ');
+}
+
+function stopSttPoll() {
+  if (_sttPoll) { clearInterval(_sttPoll); _sttPoll = null; }
+}
+
+async function startMinutesStt(paths) {
+  const ready = await call('stt_status');
+  if (ready && ready.ok && ready.engine_installed === false) {
+    toast('음성 전사 라이브러리(faster-whisper)가 설치되어 있지 않습니다.', 'warn', 5000);
+    refreshSttBanner();
+    return;
+  }
+  const r = await call('start_transcribe', { paths });
+  if (!r.ok) { toast(r.error || '전사를 시작하지 못했습니다.', 'err', 5000); return; }
+  hideNoteCard();
+  showMnSttProgress(true);
+  renderSttProgress({ ok: true, running: true, phase: 'convert', label: '변환', pct: 0,
+    current: '', done_ts: '00:00', total_ts: '00:00' });
+  stopSttPoll();
+  _sttPoll = setInterval(tickSttStatus, 400);
+  tickSttStatus();
+}
+
+async function tickSttStatus() {
+  const st = await call('transcribe_status');
+  if (!st.ok) {
+    stopSttPoll();
+    showMnSttProgress(false);
+    toast(st.error || '전사 상태를 확인하지 못했습니다.', 'err', 5000);
+    return;
+  }
+  renderSttProgress(st);
+  if (st.running) return;
+  stopSttPoll();
+  showMnSttProgress(false);
+  if (st.cancelled || st.phase === 'cancelled') {
+    toast('전사를 취소했습니다.', 'info');
+    const tr = await call('get_transcript');
+    if (tr.ok && (tr.segments || []).length) renderSttReview(tr);
+    return;
+  }
+  if (st.error) toast(st.error, 'err', 5000);
+  await loadSttTranscript();
+}
+
+async function loadSttTranscript() {
+  const tr = await call('get_transcript');
+  if (!tr.ok) { toast(tr.error || '전사본을 읽지 못했습니다.', 'err'); return; }
+  (tr.files || []).forEach(f => {
+    if (f && f.ok === false && f.error) toast(`${f.name}: ${f.error}`, 'err', 5000);
+  });
+  if (!(tr.segments || []).length) {
+    toast('인식된 발화가 없습니다. 파일·엔진을 확인하세요.', 'warn', 5000);
+    return;
+  }
+  renderSttReview(tr);
+}
+
+function hideNoteCard() {
+  const note = $('#mn-note');
+  if (note) note.classList.add('hidden');
+  const old = $('#mn-stt-review');
+  if (old) old.classList.add('hidden');
+  const audio = $('#np-audio');
+  if (audio) { try { audio.pause(); } catch (e) { /* 재생 정지 실패는 무시 */ } }
+}
+
+function noteAudio() { return $('#np-audio'); }
+
+function isMissingApi(r) {
+  return String((r && r.error) || '').indexOf('백엔드 메서드 없음') >= 0;
+}
+
+function speakerKey(s) {
+  return String((s && (s.speaker_orig || s.speaker)) || '').trim();
+}
+function speakerLabel(s) {
+  return String((s && s.speaker) || speakerKey(s) || '').trim();
+}
+function speakerInitial(name) {
+  const s = String(name || '').trim();
+  return s ? s.charAt(0) : '?';
+}
+function uniqueSpeakers(segs) {
+  const out = [];
+  (segs || []).forEach(s => {
+    const k = speakerKey(s);
+    if (k && out.indexOf(k) < 0) out.push(k);
+  });
+  return out;
+}
+function speakerColorIndex(name, order) {
+  const i = (order || []).indexOf(name);
+  return ((i < 0 ? 0 : i) % 6) + 1;
+}
+
+/* 재생 시각 표시. 1시간 미만 mm:ss, 이상 h:mm:ss. 소수점은 버린다. */
+function formatNoteTime(sec) {
+  const t = Math.floor(Number(sec));
+  if (!isFinite(t) || t < 0) return '00:00';
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  const p = n => String(n).padStart(2, '0');
+  if (h) return h + ':' + p(m) + ':' + p(s);
+  return p(m) + ':' + p(s);
+}
+
+function formatDurationKo(sec) {
+  const t = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  if (h) return h + '시간 ' + m + '분 ' + s + '초';
+  if (m) return m + '분 ' + s + '초';
+  return s + '초';
+}
+
+function formatMetaWhen(raw) {
+  const s = String(raw || '').trim();
+  if (!s) {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
+  return m ? (m[1] + ' ' + m[2]) : s;
+}
+
+function defaultNoteTitle(tr) {
+  const meta = (tr && tr.meta) || {};
+  const src = String(meta.source || '').split(',')[0].trim();
+  if (src) {
+    const base = src.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '');
+    if (base) return base;
+  }
+  const files = (tr && tr.files) || [];
+  for (let i = 0; i < files.length; i++) {
+    const n = String(files[i].name || '').replace(/\.[^.]+$/, '');
+    if (n) return n;
+  }
+  return '회의 노트';
+}
+
+/* 세그먼트 시작 시각 배열에서 x 초과의 첫 인덱스. 계약의 timeupdate 이진탐색. */
+function upperBound(arr, x) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] <= x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function renderSttReview(tr) {
+  if ($('#mn-note')) {
+    renderNote(tr);
+    return;
+  }
+  renderSttReviewFallback(tr);
+}
+
+/* W2 마크업이 오기 전 기존 검토 카드. #mn-note 가 있으면 쓰이지 않는다. */
+function renderSttReviewFallback(tr) {
+  const card = $('#mn-stt-review');
+  const spWrap = $('#mn-stt-speakers');
+  const tl = $('#mn-stt-timeline');
+  if (!card || !spWrap || !tl) return;
+  const mapping = tr.mapping || {};
+  const speakers = tr.speakers || [];
+  spWrap.innerHTML = speakers.map(sp => {
+    const orig = esc(sp);
+    const val = esc(mapping[sp] || '');
+    return `<label class="mn-stt-map">${orig}
+      <input data-orig="${orig}" value="${val}" placeholder="실명 (예: 내비온 김형일)"></label>`;
+  }).join('');
+  spWrap.querySelectorAll('input[data-orig]').forEach(inp => {
+    inp.addEventListener('input', onSttSpeakerInput);
+  });
+  tl.innerHTML = (tr.segments || []).map((s, i) => {
+    const orig = esc(s.speaker_orig || s.speaker || '');
+    const shown = esc(s.speaker || orig);
+    return `<div class="mn-stt-row">
+      <span class="mn-stt-ts">[${esc(s.ts || '')}]</span>
+      <span class="mn-stt-spk" data-orig="${orig}">${shown}</span>
+      <input class="mn-stt-text" data-idx="${i}" value="${esc(s.text || '')}">
+    </div>`;
+  }).join('');
+  tl.querySelectorAll('.mn-stt-text').forEach(inp => {
+    inp.addEventListener('change', onSttTextChange);
+  });
+  card.classList.remove('hidden');
+}
+
+function renderNote(tr) {
+  const card = $('#mn-note');
+  if (!card) return;
+  _noteHydrating = true;
+  _noteMapping = (tr && tr.mapping) || {};
+  _noteFollow = true;
+  _noteEditing = false;
+  _noteDuration = Number((tr && tr.meta && tr.meta.duration_sec) || 0);
+  hideNotePlayer();
+  const editBtn = $('#note-edit-toggle');
+  if (editBtn) editBtn.textContent = '편집';
+  renderSpeakers((tr && tr.segments) || []);
+  renderSegments((tr && tr.segments) || []);
+  renderShare((tr && tr.segments) || []);
+  const title = $('#note-title');
+  if (title) title.textContent = defaultNoteTitle(tr);
+  fillNoteMetaLine(_noteDuration, '');
+  const memo = $('#note-memo');
+  if (memo) memo.value = '';
+  _noteKeywords = [];
+  renderKeywords(_noteKeywords);
+  renderNoteSummary(null, {});
+  const old = $('#mn-stt-review');
+  if (old) old.classList.add('hidden');
+  wireNoteUi();
+  card.classList.remove('hidden');
+  _noteHydrating = false;
+  hydrateNoteExtras(tr);
+}
+
+function renderSegments(segs) {
+  const wrap = $('#note-transcript');
+  if (!wrap) return;
+  _noteSegs = (segs || []).slice();
+  _segStarts = _noteSegs.map(s => Number(s.start) || 0);
+  const order = _noteSpeakerOrder.length ? _noteSpeakerOrder : uniqueSpeakers(_noteSegs);
+  wrap.innerHTML = _noteSegs.map((s, i) => {
+    const orig = speakerKey(s);
+    const shown = speakerLabel(s) || orig;
+    const n = speakerColorIndex(orig, order);
+    const start = Number(s.start) || 0;
+    return `<div class="seg" data-idx="${i}" data-start="${start}" data-speaker="${esc(orig)}">
+  <div class="seg-gutter">
+    <span class="seg-avatar" data-speaker="${esc(orig)}" style="--spk:var(--spk-${n})">${esc(speakerInitial(shown))}</span>
+    <span class="seg-name">${esc(shown)}</span>
+    <span class="seg-time">${esc(formatNoteTime(start))}</span>
+  </div>
+  <div class="seg-text" contenteditable="${_noteEditing ? 'true' : 'false'}"></div>
+</div>`;
+  }).join('');
+  $$('.seg-text', wrap).forEach((node, i) => {
+    node.textContent = _noteSegs[i] ? (_noteSegs[i].text || '') : '';
+  });
+  _noteRows = $$('.seg', wrap);
+  _activeIdx = -1;
+}
+
+function renderKeywords(list) {
+  const wrap = $('#note-keywords');
+  if (!wrap) return;
+  _noteKeywords = (list || []).map(k => String(k || '').trim()).filter(Boolean);
+  wrap.innerHTML = _noteKeywords.map(kw =>
+    `<span class="kw-chip" data-kw="${esc(kw)}">${esc(kw)}<button class="kw-del" type="button">×</button></span>`
+  ).join('') + `<button id="note-kw-add" class="kw-add" type="button">＋</button>`;
+}
+
+function renderSpeakers(segs) {
+  const wrap = $('#note-speakers');
+  if (!wrap) return;
+  _noteSpeakerOrder = uniqueSpeakers(segs);
+  wrap.innerHTML = _noteSpeakerOrder.map((orig, i) => {
+    const n = (i % 6) + 1;
+    const shown = String((_noteMapping || {})[orig] || '').trim();
+    const initial = speakerInitial(shown || orig);
+    return `<label class="spk-row"><span class="spk-badge" data-speaker="${esc(orig)}" style="--spk:var(--spk-${n})">${esc(initial)}</span>
+  <input class="spk-input" data-speaker="${esc(orig)}" placeholder="실명 입력" value="${esc(shown)}"></label>`;
+  }).join('');
+}
+
+function segDuration(segs, i) {
+  const s = segs[i];
+  if (!s) return 0;
+  const start = Number(s.start) || 0;
+  const end = Number(s.end);
+  if (isFinite(end) && end > start) return end - start;
+  return 0;
+}
+
+function renderShare(segs) {
+  const wrap = $('#note-share');
+  if (!wrap) return;
+  const list = segs || _noteSegs || [];
+  const order = _noteSpeakerOrder.length ? _noteSpeakerOrder : uniqueSpeakers(list);
+  const totals = {};
+  let all = 0;
+  list.forEach((s, i) => {
+    const k = speakerKey(s);
+    if (!k) return;
+    const dur = segDuration(list, i);
+    totals[k] = (totals[k] || 0) + dur;
+    all += dur;
+  });
+  if (!order.length || all <= 0) {
+    wrap.innerHTML = '<div class="share-empty">발화 길이를 계산할 수 없습니다.</div>';
+    return;
+  }
+  wrap.innerHTML = order.map((orig, i) => {
+    const n = (i % 6) + 1;
+    const pct = Math.round((totals[orig] || 0) / all * 100);
+    const shown = String((_noteMapping || {})[orig] || orig).trim() || orig;
+    return `<div class="share-row" style="--spk:var(--spk-${n})">
+      <span class="share-name">${esc(shown)}</span>
+      <span class="share-pct">${pct}%</span>
+      <div class="share-bar"><span class="share-fill" style="width:${pct}%"></span></div>
+    </div>`;
+  }).join('');
+}
+
+function fillNoteMetaLine(durationSec, createdAt) {
+  const elMeta = $('#note-meta');
+  if (!elMeta) return;
+  elMeta.textContent = '전체 노트 · ' + formatMetaWhen(createdAt)
+    + ' · ' + formatDurationKo(durationSec);
+}
+
+async function hydrateNoteExtras(tr) {
+  let duration = _noteDuration;
+  let created = '';
+  const meta = await call('get_note_meta');
+  if (meta && meta.ok) {
+    _noteHydrating = true;
+    const title = $('#note-title');
+    if (title && String(meta.title || '').trim()) title.textContent = String(meta.title).trim();
+    const memo = $('#note-memo');
+    if (memo && meta.memo != null) memo.value = String(meta.memo);
+    if (Array.isArray(meta.keywords)) renderKeywords(meta.keywords);
+    if (meta.duration_sec != null && meta.duration_sec !== '') {
+      duration = Number(meta.duration_sec) || duration;
+      _noteDuration = duration;
+    }
+    created = meta.created_at || '';
+    fillNoteMetaLine(duration, created);
+    _noteHydrating = false;
+  }
+  const sum = await call('get_note_summary');
+  if (sum && sum.ok) {
+    renderNoteSummary(sum.summary, sum.summary_meta);
+    const n = $('#note-notice');
+    if (n) n.classList.toggle('hidden', !!sum.notice_shown);
+  }
+  await bindNoteAudio(duration);
+}
+
+function hideNotePlayer() {
+  const p = $('#note-player');
+  if (p) p.classList.add('hidden');
+  _noteHasAudio = false;
+  setPlayIcon(false);
+}
+
+function showNotePlayer() {
+  const p = $('#note-player');
+  if (p) p.classList.remove('hidden');
+  _noteHasAudio = true;
+}
+
+function setPlayIcon(playing) {
+  const btn = $('#np-play');
+  if (!btn) return;
+  btn.textContent = playing ? '❚❚' : '▶';
+  btn.title = playing ? '일시정지' : '재생';
+}
+
+function audioDuration(audio) {
+  const d = audio && audio.duration;
+  if (d && isFinite(d) && d > 0) return d;
+  return _noteDuration || 0;
+}
+
+async function bindNoteAudio(durationSec) {
+  const audio = noteAudio();
+  if (!audio) { hideNotePlayer(); return; }
+  try { audio.pause(); } catch (e) { /* 무시 */ }
+  audio.removeAttribute('src');
+  try { audio.load(); } catch (e) { /* 무시 */ }
+  const r = await call('get_audio_url');
+  const url = r && r.url ? String(r.url) : '';
+  if (!r || !r.ok || !url || url.toLowerCase().indexOf('file:') === 0) {
+    hideNotePlayer();
+    return;
+  }
+  if (r.duration_sec != null && r.duration_sec !== '') {
+    _noteDuration = Number(r.duration_sec) || durationSec || 0;
+  } else {
+    _noteDuration = durationSec || 0;
+  }
+  audio.src = url;
+  showNotePlayer();
+  const tot = $('#np-total');
+  if (tot) tot.textContent = formatNoteTime(_noteDuration);
+  const cur = $('#np-cur');
+  if (cur) cur.textContent = '00:00';
+  const seek = $('#np-seek');
+  if (seek) seek.value = 0;
+  audio.playbackRate = NOTE_RATES[_noteRateIdx] || 1;
+  const rateBtn = $('#np-rate');
+  if (rateBtn) rateBtn.textContent = (NOTE_RATES[_noteRateIdx] || 1) + 'x';
+}
+
+function noteRowVisible(row) {
+  const wrap = $('#note-transcript');
+  if (!wrap || !row) return false;
+  const cr = wrap.getBoundingClientRect();
+  const rr = row.getBoundingClientRect();
+  return rr.top >= cr.top && rr.bottom <= cr.bottom;
+}
+
+function updateNoteTimes() {
+  const audio = noteAudio();
+  if (!audio) return;
+  const cur = $('#np-cur');
+  if (cur) cur.textContent = formatNoteTime(audio.currentTime || 0);
+  const tot = $('#np-total');
+  const dur = audioDuration(audio);
+  if (tot && dur) tot.textContent = formatNoteTime(dur);
+  if (_noteSeeking) return;
+  const seek = $('#np-seek');
+  if (seek && dur) seek.value = String(Math.round((audio.currentTime || 0) / dur * 1000));
+}
+
+function onNoteTimeUpdate() {
+  const audio = noteAudio();
+  if (!audio) return;
+  updateNoteTimes();
+  const i = upperBound(_segStarts, audio.currentTime) - 1;
+  if (i === _activeIdx) return;
+  const rows = _noteRows;
+  if (_activeIdx >= 0 && rows[_activeIdx]) rows[_activeIdx].classList.remove('active');
+  if (i >= 0 && rows[i]) {
+    rows[i].classList.add('active');
+    if (!_noteEditing && _noteFollow) {
+      _noteIgnoreScroll = true;
+      rows[i].scrollIntoView({ block: 'nearest' });
+      _noteIgnoreScroll = false;
+    } else if (!_noteEditing && noteRowVisible(rows[i])) {
+      _noteFollow = true;
+    }
+  }
+  _activeIdx = i;
+}
+
+function setNoteEditing(on) {
+  _noteEditing = !!on;
+  const btn = $('#note-edit-toggle');
+  if (btn) btn.textContent = _noteEditing ? '완료' : '편집';
+  $$('#note-transcript .seg-text').forEach(t => {
+    t.setAttribute('contenteditable', _noteEditing ? 'true' : 'false');
+  });
+  if (!_noteEditing) flushSegTextSave();
+}
+
+function scheduleNoteMetaSave() {
+  if (_noteHydrating) return;
+  if (_noteMetaTimer) clearTimeout(_noteMetaTimer);
+  _noteMetaTimer = setTimeout(saveNoteMeta, 800);
+}
+
+async function saveNoteMeta() {
+  _noteMetaTimer = null;
+  const titleEl = $('#note-title');
+  const memoEl = $('#note-memo');
+  const payload = {
+    title: titleEl ? String(titleEl.textContent || '').trim() : '',
+    memo: memoEl ? (memoEl.value || '') : '',
+    keywords: _noteKeywords.slice(),
+  };
+  const r = await call('update_note_meta', payload);
+  if (!r || r.ok || isMissingApi(r)) return;
+  toast(r.error || '노트 정보를 저장하지 못했습니다.', 'err');
+}
+
+function addKeyword(kw) {
+  const v = String(kw || '').trim();
+  if (!v) return;
+  if (_noteKeywords.indexOf(v) >= 0) return;
+  _noteKeywords.push(v);
+  renderKeywords(_noteKeywords);
+  scheduleNoteMetaSave();
+}
+
+function removeKeyword(kw) {
+  _noteKeywords = _noteKeywords.filter(k => k !== kw);
+  renderKeywords(_noteKeywords);
+  scheduleNoteMetaSave();
+}
+
+/* ── AI 요약 (PRD_회의록노트 NR-01~04) ─────────────────────────────
+   t_ms < 0 은 근거 미확인(NO_EVIDENCE) — 시각 칩 대신 배지를 단다. */
+
+function sumTs(tms) {
+  const ms = Number(tms);
+  if (!isFinite(ms) || ms < 0) return '';
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = String(m).padStart(2, '0'), ss = String(s).padStart(2, '0');
+  return h ? (h + ':' + mm + ':' + ss) : (mm + ':' + ss);
+}
+
+function sumEv(tms) {
+  const ts = sumTs(tms);
+  if (!ts) return '<span class="sum-ev sum-ev-none">근거 미확인</span>';
+  return `<button class="sum-ev" type="button" data-tms="${Number(tms)}" title="이 지점으로 이동">${ts}</button>`;
+}
+
+function sumText(k, text) {
+  return `<span class="sum-text" data-k="${k}">${esc(text || '')}</span>`;
+}
+
+function renderNoteSummary(s, meta) {
+  _noteSummary = s || null;
+  _noteSumEditing = false;
+  const wrap = $('#note-summary');
+  if (!wrap) return;
+  wrap.classList.remove('sum-editing');
+  const editBtn = $('#note-sum-edit');
+  if (editBtn) {
+    editBtn.textContent = '편집';
+    editBtn.classList.toggle('hidden', !s);
+  }
+  if (!s) {
+    wrap.innerHTML = '<div class="sum-empty">요약이 아직 없습니다. [✦ 요약 생성]을 누르면 전사본에서 주제·결정사항·할 일을 뽑아냅니다.</div>';
+    return;
+  }
+  meta = meta || {};
+  const html = [];
+  const badges = [];
+  if (meta.chunked) badges.push('<span class="sum-badge">구간 분할 요약</span>');
+  if (meta.edited_by_user) badges.push('<span class="sum-badge">수정됨</span>');
+  if (badges.length) html.push(`<div class="sum-badges">${badges.join('')}</div>`);
+  if (s.one_liner) html.push(`<div class="sum-one">${sumText('one_liner', s.one_liner)}</div>`);
+  (s.topics || []).forEach((t, i) => {
+    const pts = (t.points || []).map((p, j) =>
+      `<li>${sumText(`topics.${i}.points.${j}`, p)}</li>`).join('');
+    html.push(`<div class="sum-topic">
+      <div class="sum-topic-head">■ ${sumText(`topics.${i}.title`, t.title)} ${sumEv(t.t_ms)}</div>
+      ${pts ? `<ul class="sum-points">${pts}</ul>` : ''}</div>`);
+  });
+  const rows = (key, label, fmt) => {
+    const arr = s[key] || [];
+    if (!arr.length) return;
+    html.push(`<div class="sum-h">${label}</div>`);
+    html.push('<ul class="sum-list">' + arr.map(fmt).join('') + '</ul>');
+  };
+  rows('decisions', '결정사항', (d, i) =>
+    `<li>${sumText(`decisions.${i}.text`, d.text)} ${sumEv(d.t_ms)}</li>`);
+  rows('action_items', '할 일', (a, i) => {
+    const extra = [a.owner, a.due].filter(Boolean).map(esc).join(' · ');
+    return `<li>${sumText(`action_items.${i}.task`, a.task)}` +
+      (extra ? ` <span class="sum-meta">${extra}</span>` : '') +
+      ` ${sumEv(a.t_ms)}</li>`;
+  });
+  rows('open_issues', '미결 안건', (o, i) =>
+    `<li>${sumText(`open_issues.${i}.text`, o.text)} ${sumEv(o.t_ms)}</li>`);
+  wrap.innerHTML = html.join('');
+  // NR-02: 요약이 뽑은 키워드를 노트 키워드 칩으로 — 사용자가 아직 안 넣었을 때만
+  if (!_noteKeywords.length && Array.isArray(s.keywords) && s.keywords.length) {
+    _noteKeywords = s.keywords.slice();
+    renderKeywords(_noteKeywords);
+    scheduleNoteMetaSave();
+  }
+}
+
+function jumpToEvidence(tms) {
+  const sec = Math.max(0, Number(tms) / 1000);
+  const audio = noteAudio();
+  if (_noteHasAudio && audio) {
+    audio.currentTime = sec;
+    _noteFollow = true;
+  }
+  // t_ms는 [mm:ss] 표기의 초 내림값 — 같은 초 안에서 시작하는 세그먼트를 잡으려면
+  // 허용오차가 1초 가까이 필요하다 (0.001이면 항상 직전 행이 잡힌다)
+  const i = Math.max(0, upperBound(_segStarts, sec + 0.999) - 1);
+  const row = _noteRows[i];
+  if (row) {
+    row.scrollIntoView({ block: 'center' });
+    row.classList.add('flash');
+    setTimeout(() => row.classList.remove('flash'), 1200);
+  }
+}
+
+async function runNoteSummary() {
+  if (_noteSumRunning) return;
+  if (_noteSumEditing) {
+    toast('요약을 편집 중입니다. [완료]를 누른 뒤 다시 생성하세요.', 'err');
+    return;
+  }
+  _noteSumRunning = true;
+  const btn = $('#note-sum-run');
+  const st = $('#note-sum-status');
+  if (btn) btn.disabled = true;
+  if (st) {
+    st.textContent = 'AI 요약 생성 중… 회의가 길면 수십 초 걸립니다.';
+    st.classList.remove('hidden');
+  }
+  try {
+    const r = await call('summarize_note_session');
+    if (!r.ok) { toast(r.error || '요약 생성에 실패했습니다.', 'err'); return; }
+    renderNoteSummary(r.summary, r.summary_meta);
+    toast('AI 요약을 만들었습니다.', 'ok');
+  } finally {
+    _noteSumRunning = false;
+    if (btn) btn.disabled = false;
+    if (st) st.classList.add('hidden');
+  }
+}
+
+function setNoteSumEditing(on) {
+  _noteSumEditing = !!on;
+  const btn = $('#note-sum-edit');
+  if (btn) btn.textContent = _noteSumEditing ? '완료' : '편집';
+  $$('#note-summary .sum-text').forEach(el =>
+    el.setAttribute('contenteditable', _noteSumEditing ? 'true' : 'false'));
+  const wrap = $('#note-summary');
+  if (wrap) wrap.classList.toggle('sum-editing', _noteSumEditing);
+  if (!_noteSumEditing) saveNoteSummaryEdits();
+}
+
+async function saveNoteSummaryEdits() {
+  if (!_noteSummary) return;
+  const s = JSON.parse(JSON.stringify(_noteSummary));
+  let changed = false;
+  $$('#note-summary .sum-text').forEach(el => {
+    const path = String(el.dataset.k || '').split('.');
+    let cur = s;
+    for (let i = 0; i < path.length - 1; i++) cur = cur ? cur[path[i]] : null;
+    const leaf = path[path.length - 1];
+    if (cur == null || !(leaf in cur)) return;
+    const v = String(el.textContent || '').trim();
+    if (String(cur[leaf] || '') !== v) { cur[leaf] = v; changed = true; }
+  });
+  if (!changed) return;
+  const r = await call('update_note_summary', { summary: s });
+  if (!r.ok) { toast(r.error || '요약 수정을 반영하지 못했습니다.', 'err'); return; }
+  renderNoteSummary(r.summary, r.summary_meta);
+}
+
+async function closeNoteNotice() {
+  const n = $('#note-notice');
+  if (n) n.classList.add('hidden');
+  await call('mark_note_notice_seen');
+}
+
+function beginAddKeyword() {
+  const wrap = $('#note-keywords');
+  if (!wrap || wrap.querySelector('.kw-new')) return;
+  const addBtn = $('#note-kw-add');
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.className = 'kw-new';
+  inp.placeholder = '키워드';
+  if (addBtn) wrap.insertBefore(inp, addBtn);
+  else wrap.appendChild(inp);
+  inp.focus();
+  const commit = () => {
+    const v = (inp.value || '').trim();
+    if (inp.parentNode) inp.remove();
+    if (v) addKeyword(v);
+  };
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+    if (e.key === 'Escape') { inp.value = ''; inp.blur(); }
+  });
+}
+
+function scheduleSegTextSave(idx, text) {
+  if (_noteSegTextTimer) clearTimeout(_noteSegTextTimer);
+  _noteSegTextTimer = setTimeout(() => { _noteSegTextTimer = null; saveSegText(idx, text); }, 400);
+}
+
+function flushSegTextSave() {
+  if (_noteSegTextTimer) { clearTimeout(_noteSegTextTimer); _noteSegTextTimer = null; }
+  const focused = document.activeElement;
+  if (focused && focused.classList && focused.classList.contains('seg-text')) {
+    const row = focused.closest('.seg');
+    if (row) saveSegText(row.dataset.idx, focused.textContent);
+  }
+}
+
+async function saveSegText(idx, text) {
+  const n = parseInt(idx, 10);
+  if (!isFinite(n)) return;
+  if (_noteSegs[n]) _noteSegs[n].text = text;
+  const r = await call('update_transcript', { index: n, text: text });
+  if (!r.ok) toast(r.error || '세그먼트 수정에 실패했습니다.', 'err');
+}
+
+function seekNoteBy(delta) {
+  const audio = noteAudio();
+  if (!audio || !_noteHasAudio) return;
+  const dur = audioDuration(audio);
+  let t = (audio.currentTime || 0) + delta;
+  if (t < 0) t = 0;
+  if (dur && t > dur) t = dur;
+  audio.currentTime = t;
+  _noteFollow = true;
+  onNoteTimeUpdate();
+}
+
+function seekNoteTo(sec) {
+  const audio = noteAudio();
+  if (!audio || !_noteHasAudio) return;
+  audio.currentTime = sec;
+  _noteFollow = true;
+  const p = audio.play();
+  if (p && p.catch) p.catch(() => {});
+}
+
+function cycleNoteRate() {
+  const audio = noteAudio();
+  _noteRateIdx = (_noteRateIdx + 1) % NOTE_RATES.length;
+  const rate = NOTE_RATES[_noteRateIdx];
+  if (audio) audio.playbackRate = rate;
+  const btn = $('#np-rate');
+  if (btn) btn.textContent = rate + 'x';
+}
+
+async function toggleNotePlay() {
+  const audio = noteAudio();
+  if (!audio || !_noteHasAudio) return;
+  if (audio.paused) {
+    const p = audio.play();
+    if (p && p.catch) p.catch(() => hideNotePlayer());
+  } else {
+    audio.pause();
+  }
+}
+
+function notePlainText() {
+  return (_noteSegs || []).map(s => {
+    const ts = formatNoteTime(s.start);
+    const sp = String(s.speaker || '').trim();
+    const text = s.text || '';
+    return sp ? `[${ts}] ${sp}: ${text}` : `[${ts}] ${text}`;
+  }).join('\n');
+}
+
+async function copyNoteTranscript() {
+  const body = notePlainText();
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(body);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = body;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    toast('전사본을 복사했습니다.', 'ok');
+  } catch (e) {
+    toast('복사에 실패했습니다.', 'err');
+  }
+}
+
+async function downloadNoteTranscript() {
+  const r = await call('save_transcript', { folder: state.minutesFolder || '' });
+  if (!r.ok) { toast(r.error || '전사본을 저장하지 못했습니다.', 'err'); return; }
+  // 노트 사이드카(.note.json)도 같은 베이스명으로 — 저장 = 전사본 + 노트
+  const n = await call('save_note', { folder: state.minutesFolder || '' });
+  const notePart = (n && n.ok) ? ' (+노트)' : '';
+  toast('전사본을 저장했습니다' + notePart + ': ' + (r.json_path || r.txt_path || ''), 'ok', 5000);
+}
+
+function onNoteSeekInput() {
+  _noteSeeking = true;
+  const audio = noteAudio();
+  const seek = $('#np-seek');
+  if (!audio || !seek || !_noteHasAudio) return;
+  const dur = audioDuration(audio);
+  if (!dur) return;
+  audio.currentTime = (+seek.value / 1000) * dur;
+  const cur = $('#np-cur');
+  if (cur) cur.textContent = formatNoteTime(audio.currentTime);
+}
+
+function onNoteSeekEnd() {
+  _noteSeeking = false;
+  _noteFollow = true;
+}
+
+function wireNoteUi() {
+  if (_noteUiWired) return;
+  const root = $('#mn-note');
+  if (!root) return;
+  _noteUiWired = true;
+  // 계약상 초기 상태는 hidden. W2 샘플 마크업이 보여도 전사가 끝나기 전에는 닫아 둔다.
+  root.classList.add('hidden');
+
+  const editBtn = $('#note-edit-toggle');
+  if (editBtn) editBtn.addEventListener('click', () => setNoteEditing(!_noteEditing));
+  const sumRun = $('#note-sum-run');
+  if (sumRun) sumRun.addEventListener('click', runNoteSummary);
+  const sumEdit = $('#note-sum-edit');
+  if (sumEdit) sumEdit.addEventListener('click', () => setNoteSumEditing(!_noteSumEditing));
+  const noticeClose = $('#note-notice-close');
+  if (noticeClose) noticeClose.addEventListener('click', closeNoteNotice);
+  const sumWrap = $('#note-summary');
+  if (sumWrap) {
+    sumWrap.addEventListener('click', e => {
+      const ev = e.target.closest('.sum-ev[data-tms]');
+      if (ev && !_noteSumEditing) jumpToEvidence(ev.dataset.tms);
+    });
+    // 요약 항목은 단일행 모델(_one_line) — Enter로 줄을 나누면 저장 때 융합된다
+    sumWrap.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.target.closest('.sum-text')) {
+        e.preventDefault();
+        e.target.blur();
+      }
+    });
+  }
+  const copyBtn = $('#note-copy');
+  if (copyBtn) copyBtn.addEventListener('click', copyNoteTranscript);
+  const dlBtn = $('#note-download');
+  if (dlBtn) dlBtn.addEventListener('click', downloadNoteTranscript);
+
+  const title = $('#note-title');
+  if (title) {
+    title.addEventListener('input', scheduleNoteMetaSave);
+    title.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); title.blur(); }
+    });
+    title.addEventListener('paste', e => {
+      e.preventDefault();
+      const t = (e.clipboardData || window.clipboardData).getData('text/plain') || '';
+      document.execCommand('insertText', false, t);
+    });
+  }
+  const memo = $('#note-memo');
+  if (memo) memo.addEventListener('input', scheduleNoteMetaSave);
+
+  const kwWrap = $('#note-keywords');
+  if (kwWrap) kwWrap.addEventListener('click', e => {
+    if (e.target.closest('#note-kw-add') || e.target.closest('.kw-add')) {
+      e.preventDefault();
+      beginAddKeyword();
+      return;
+    }
+    const del = e.target.closest('.kw-del');
+    if (!del) return;
+    e.preventDefault();
+    const chip = del.closest('.kw-chip');
+    if (chip && chip.dataset.kw) removeKeyword(chip.dataset.kw);
+  });
+
+  const spWrap = $('#note-speakers');
+  if (spWrap) spWrap.addEventListener('input', e => {
+    if (e.target.classList.contains('spk-input')) onSttSpeakerInput();
+  });
+
+  const tl = $('#note-transcript');
+  if (tl) {
+    tl.addEventListener('click', e => {
+      if (e.target.closest('.seg-text[contenteditable="true"]')) return;
+      const seg = e.target.closest('.seg');
+      if (!seg || !_noteHasAudio) return;
+      const start = parseFloat(seg.dataset.start);
+      if (!isFinite(start)) return;
+      seekNoteTo(start);
+    });
+    tl.addEventListener('scroll', () => {
+      if (_noteIgnoreScroll) return;
+      _noteFollow = false;
+    });
+    tl.addEventListener('input', e => {
+      const t = e.target.closest && e.target.closest('.seg-text');
+      if (!t) return;
+      const row = t.closest('.seg');
+      if (!row) return;
+      scheduleSegTextSave(row.dataset.idx, t.textContent);
+    });
+    tl.addEventListener('blur', e => {
+      const t = e.target && e.target.classList && e.target.classList.contains('seg-text') ? e.target : null;
+      if (!t) return;
+      const row = t.closest('.seg');
+      if (!row) return;
+      if (_noteSegTextTimer) { clearTimeout(_noteSegTextTimer); _noteSegTextTimer = null; }
+      saveSegText(row.dataset.idx, t.textContent);
+    }, true);
+  }
+
+  const play = $('#np-play');
+  if (play) play.addEventListener('click', toggleNotePlay);
+  const back = $('#np-back5');
+  if (back) back.addEventListener('click', () => seekNoteBy(-5));
+  const fwd = $('#np-fwd5');
+  if (fwd) fwd.addEventListener('click', () => seekNoteBy(5));
+  const rate = $('#np-rate');
+  if (rate) rate.addEventListener('click', cycleNoteRate);
+  const seek = $('#np-seek');
+  if (seek) {
+    seek.addEventListener('pointerdown', () => { _noteSeeking = true; });
+    seek.addEventListener('input', onNoteSeekInput);
+    seek.addEventListener('change', onNoteSeekEnd);
+    seek.addEventListener('pointerup', onNoteSeekEnd);
+  }
+
+  const audio = noteAudio();
+  if (audio) {
+    audio.addEventListener('timeupdate', onNoteTimeUpdate);
+    audio.addEventListener('loadedmetadata', () => {
+      if (audio.duration && isFinite(audio.duration)) _noteDuration = audio.duration;
+      updateNoteTimes();
+    });
+    audio.addEventListener('play', () => setPlayIcon(true));
+    audio.addEventListener('pause', () => setPlayIcon(false));
+    audio.addEventListener('ended', () => setPlayIcon(false));
+    audio.addEventListener('error', () => hideNotePlayer());
+  }
+}
+
+function collectSpeakerMapping() {
+  const m = {};
+  const newInputs = $$('#note-speakers .spk-input');
+  if (newInputs.length) {
+    newInputs.forEach(inp => {
+      const v = (inp.value || '').trim();
+      if (v) m[inp.dataset.speaker] = v;
+    });
+    return m;
+  }
+  $$('#mn-stt-speakers input[data-orig]').forEach(inp => {
+    const v = (inp.value || '').trim();
+    if (v) m[inp.dataset.orig] = v;
+  });
+  return m;
+}
+
+function onSttSpeakerInput() {
+  if (_sttMapTimer) clearTimeout(_sttMapTimer);
+  _sttMapTimer = setTimeout(applySttSpeakerNames, 250);
+}
+
+async function applySttSpeakerNames() {
+  const hasNew = $$('#note-speakers .spk-input').length;
+  const hasOld = $$('#mn-stt-speakers input[data-orig]').length;
+  if (!hasNew && !hasOld) return;
+  const r = await call('set_speaker_names', { mapping: collectSpeakerMapping() });
+  if (!r.ok) { toast(r.error || '화자 이름을 반영하지 못했습니다.', 'err'); return; }
+  const map = r.mapping || {};
+  _noteMapping = map;
+  _noteSegs.forEach(s => {
+    const orig = speakerKey(s);
+    if (orig) s.speaker = map[orig] || orig;
+  });
+  $$('#note-transcript .seg').forEach(row => {
+    const orig = row.dataset.speaker || '';
+    const name = map[orig] || orig;
+    const nameEl = row.querySelector('.seg-name');
+    const av = row.querySelector('.seg-avatar');
+    if (nameEl) nameEl.textContent = name;
+    if (av) av.textContent = speakerInitial(name);
+  });
+  $$('#note-speakers .spk-badge').forEach(b => {
+    const orig = b.dataset.speaker || '';
+    b.textContent = speakerInitial(map[orig] || orig);
+  });
+  renderShare(_noteSegs);
+  $$('#mn-stt-timeline .mn-stt-spk').forEach(el => {
+    const orig = el.dataset.orig || '';
+    el.textContent = map[orig] || orig;
+  });
+}
+
+async function onSttTextChange(e) {
+  const inp = e.currentTarget;
+  const idx = inp.dataset.idx;
+  const r = await call('update_transcript', { index: idx, text: inp.value });
+  if (!r.ok) toast(r.error || '세그먼트 수정에 실패했습니다.', 'err');
+}
+
+async function cancelMinutesStt() {
+  const r = await call('cancel_transcribe');
+  if (!r.ok) toast(r.error || '취소에 실패했습니다.', 'err');
+}
+
+async function sttToMinutes() {
+  if (_sttMapTimer) { clearTimeout(_sttMapTimer); _sttMapTimer = null; }
+  await applySttSpeakerNames();
+  // 요약이 있으면 §6.4 요약 텍스트, 없으면 전사본 전문 폴백 (NR-08)
+  const r = await call('note_to_minutes');
+  if (!r.ok) { toast(r.error || '전사본을 넣지 못했습니다.', 'err'); return; }
+  const text = r.description || r.text || '';
+  const memo = $('#mn-memo');
+  const prev = (memo.value || '').trim();
+  memo.value = prev ? (prev + '\n\n' + text) : text;
+  await runMinutesDraft();
+}
+
+async function refreshSttBanner() {
+  const banner = $('#mn-stt-banner');
+  const text = $('#mn-stt-banner-text');
+  const btn = $('#mn-stt-install');
+  if (!banner) return;
+  const st = await call('stt_status');
+  if (!st.ok) {
+    banner.classList.remove('hidden');
+    if (text) text.textContent = st.error || '음성 전사 엔진 상태를 확인하지 못했습니다.';
+    if (btn) btn.classList.add('hidden');
+    return;
+  }
+  const models = st.models || {};
+  const seg = models.segmentation && models.segmentation.present;
+  const emb = models.embedding && models.embedding.present;
+  const needEngine = !st.engine_installed;
+  const needDiarize = st.diarize_installed === false;
+  const needModels = !seg || !emb;
+  if (!needEngine && !needDiarize && !needModels) {
+    banner.classList.add('hidden');
+    return;
+  }
+  banner.classList.remove('hidden');
+  const parts = [];
+  if (needEngine) parts.push('음성 전사 라이브러리(faster-whisper)가 설치되어 있지 않습니다.');
+  if (needDiarize) parts.push('화자 분리 라이브러리(sherpa-onnx)가 설치되어 있지 않습니다.');
+  if (needModels) parts.push('화자 분리 모델이 없습니다. [설치]로 내려받으세요.');
+  if (text) text.textContent = parts.join(' ');
+  if (btn) btn.classList.toggle('hidden', !needModels);
+}
+
+async function installSttModelsUi() {
+  const btn = $('#mn-stt-install');
+  if (btn) btn.disabled = true;
+  showMnSttProgress(true);
+  renderSttProgress({ ok: true, running: true, phase: 'install', label: '모델 설치', pct: 0,
+    current: '모델', done_ts: '00:00', total_ts: '00:00' });
+  const r = await call('install_stt_models');
+  showMnSttProgress(false);
+  if (btn) btn.disabled = false;
+  if (!r.ok) { toast(r.error || '모델 설치에 실패했습니다.', 'err', 5000); return; }
+  toast('화자 분리 모델을 준비했습니다.', 'ok', 4000);
+  refreshSttBanner();
+}
+
+window.onSttProgress = function(info) { renderSttProgress(info); };
 
 function setMnStatus(msg, kind) {
   const box = $('#mn-status');
@@ -1991,7 +3107,21 @@ async function runGenerateMinutes(data) {
   if (r.warning) toast(r.warning, 'warn', 5000);
   toast('회의록 HWPX 생성 완료! 파일을 엽니다.', 'ok', 4000);
   call('open_file', r.path);
+  await saveSttTranscriptBeside(r.path);  // FR-08: .minutes.json 옆에 전사 원문
   refreshMinutesDashboard();   // 대시보드 목록 즉시 갱신
+}
+
+async function saveSttTranscriptBeside(hwpxPath) {
+  // 회의록 HWPX(.minutes.json 옆)에 전사 원문을 남긴다. STT 세션이 없으면 건너뛴다.
+  if (!hwpxPath) return;
+  const tr = await call('get_transcript');
+  if (!tr.ok || !(tr.segments || []).length) return;
+  const sv = await call('save_transcript', { out_path: hwpxPath });
+  if (!sv.ok) {
+    toast(sv.error || '전사본 저장에 실패했습니다.', 'warn', 5000);
+    return;
+  }
+  toast('전사 원문을 저장했습니다: ' + (sv.json_path || sv.txt_path || ''), 'ok', 5000);
 }
 
 function initMinutesView() {
@@ -2000,6 +3130,7 @@ function initMinutesView() {
   setMnStatus('');
   showMinutesStep(1);
   refreshConvertStatus();
+  refreshSttBanner();
 }
 
 /* ===================================================================
@@ -3092,6 +4223,13 @@ async function init() {
     const r = await call('pick_convert_files');
     if (r && r.ok && r.paths && r.paths.length) await handleMinutesDroppedPaths(r.paths);
   });
+  const sttInst = $('#mn-stt-install');
+  if (sttInst) sttInst.addEventListener('click', installSttModelsUi);
+  const sttCancel = $('#mn-stt-cancel');
+  if (sttCancel) sttCancel.addEventListener('click', cancelMinutesStt);
+  const sttToMn = $('#mn-stt-to-minutes');
+  if (sttToMn) sttToMn.addEventListener('click', sttToMinutes);
+  wireNoteUi();
   $('#mn-r-back').addEventListener('click', () => showMinutesStep(1));
   $('#mn-r-add-participant').addEventListener('click', () => addParticipantRow(''));
   $('#mn-r-gen').addEventListener('click', generateMinutes);

@@ -93,12 +93,40 @@ hiddenimports = [
     "pythoncom", "pywintypes",
     # pythonnet (pywebview EdgeChromium 백엔드)
     "clr",
+    # STT 도메인 모듈 — src/api/stt.py 가 메서드 안에서만 import 하므로
+    # PyInstaller 정적 분석이 빠뜨린다. 우리 코드를 명시한다.
+    "src.stt",
+    "src.stt.audio",
+    "src.stt.engine",
+    "src.stt.diarize",
+    "src.stt.runtime",
+    "src.stt.serialize",
+    "src.api.stt",
+    # 노트 도메인 모듈 — src/api/note.py·stt.py 가 메서드 안에서만 import 한다.
+    # src.note.serve 가 빠지면 exe 에서 전사 후 오디오 재생이 죽는다.
+    "src.note",
+    "src.note.serve",
+    "src.note.store",
+    "src.note.serialize",
+    "src.note.summarize",
+    "src.ai.note",
+    "src.api.note",
+    # STT 엔진 — 우리 코드가 전부 *함수 안에서* import 하므로 정적 분석에 안 잡힌다.
+    # 명시하지 않으면 exe 에서 "PyAV 가 설치되어 있지 않습니다" 로 전사가 죽는다.
+    "av",
+    "faster_whisper",
+    "ctranslate2",
+    "sherpa_onnx",
 ]
 
 # 데이터/바이너리/서브모듈을 통째로 수집해야 안전한 패키지들
+# STT 엔진은 네이티브 DLL(FFmpeg·onnxruntime)과 데이터 파일을 함께 들고 있어
+# collect_all 로 통째로 담아야 exe 에서 동작한다. 모델은 여전히 런타임 다운로드다.
 for pkg in ("webview", "clr_loader", "pythonnet", "pyhwpx",
             "googleapiclient", "google_auth_oauthlib",
-            "google.auth", "google.oauth2", "google_auth_httplib2"):
+            "google.auth", "google.oauth2", "google_auth_httplib2",
+            "av", "faster_whisper", "ctranslate2", "sherpa_onnx",
+            "onnxruntime", "tokenizers", "huggingface_hub"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -116,7 +144,27 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "pytest", "_pytest", "matplotlib"],
+    excludes=[
+        "tkinter", "pytest", "_pytest", "matplotlib",
+        # ── STT 엔진은 *동봉한다*. 빼면 배포판에서 기능이 죽는다. ──────────────
+        # 2026-08-20 실사용 확인: 엔진을 excludes 로 빼고 배포했더니 exe 에서
+        # "음성 변환 라이브러리(PyAV)가 설치되어 있지 않습니다" 로 전사가 실패했다.
+        # frozen onedir 에는 pip 이 없어 사용자가 나중에 설치할 방법이 없다.
+        # "선택 설치"는 소스로 실행할 때만 성립하는 이야기였다.
+        #
+        # PRD §7.6 이 배제한 것은 **모델 동봉**(whisper small 만 972 MB)이지
+        # 엔진 라이브러리가 아니다. 둘을 구분한다:
+        #   엔진(약 242 MB) → exe 에 동봉    ← av/ctranslate2/onnxruntime/numpy 등
+        #   모델(약 1 GB)   → 런타임 다운로드 ← src/stt/runtime.py, kordoc 선례
+        # 따라서 av·faster_whisper·ctranslate2·sherpa_onnx·onnxruntime·
+        # tokenizers·huggingface_hub·numpy 는 excludes 에 넣지 않는다.
+        #
+        # 아래 셋은 계속 배제한다 — faster-whisper(CTranslate2)는 이들을 쓰지 않고,
+        # 딸려 들어오면 수 GB 가 붙는다.
+        "transformers",
+        "torch",
+        "torchaudio",
+    ],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

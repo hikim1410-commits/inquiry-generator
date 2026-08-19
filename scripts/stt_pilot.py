@@ -14,6 +14,7 @@ PRD §10 Q5~Q9(한영 혼용 / 분당 글자수 / 처리시간 / 설치용량)�
     --model small      whisper 모델 크기(기본 medium)
     --speakers N       화자 수 고정(기본 -1 = 자동 추정)
     --self-test        화자 매칭 로직만 검증하고 종료
+    --json-out PATH    통계 JSON 저장 위치(기본: 각 wav 옆 .{model}.pilot.json)
 """
 from __future__ import annotations
 
@@ -52,7 +53,10 @@ def ensure_models() -> tuple[Path, Path]:
     seg_dir = CACHE / "sherpa-onnx-pyannote-segmentation-3-0"
     if not seg_dir.exists():
         with tarfile.open(_download(SEG_URL)) as tf:
-            tf.extractall(CACHE)
+            try:
+                tf.extractall(CACHE, filter="data")
+            except TypeError:
+                tf.extractall(CACHE)
     return seg_dir / "model.onnx", _download(EMB_URL)
 
 
@@ -121,33 +125,72 @@ def mmss(sec: float) -> str:
     return f"{int(sec) // 60:02d}:{int(sec) % 60:02d}"
 
 
+def _dir_bytes(root: Path) -> int:
+    if not root.exists():
+        return 0
+    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+
+
+def _hf_cache_root() -> Path:
+    return Path.home() / ".cache" / "huggingface"
+
+
 def run_one(path: Path, args) -> dict:
-    print(f"\n=== {path.name} ===", flush=True)
+    print(f"\n=== {path.name}  model={args.model}  lang={args.lang!r} ===",
+          flush=True)
     r = transcribe(path, args)
     lines = assign_speakers(r["segments"], r["turns"])
 
     body = "\n".join(
         f"[{mmss(s)}] 화자{spk if spk is not None else '?'}: {text}"
         for s, _e, spk, text in lines)
-    out = path.with_suffix(".pilot.txt")
+    tag = args.model
+    out = path.with_name(f"{path.stem}.{tag}.pilot.txt")
     out.write_text(body, encoding="utf-8")
 
     dur = len(r["audio"]) / 16000
     chars = sum(len(t) for *_x, t in lines)
+    n_spk = len({spk for _s, _e, spk in r["turns"]})
+    t_asr = r["t_asr"]
+    t_diar = r["t_diar"]
     stat = {
         "file": path.name,
-        "녹음길이_분": round(dur / 60, 1),
+        "model": args.model,
+        "lang": args.lang,
+        "녹음길이_초": round(dur, 2),
+        "녹음길이_분": round(dur / 60, 3),
         "감지언어": r["info"].language,
         "언어확률": round(r["info"].language_probability, 3),
         "전사글자수": chars,
         "분당글자수": round(chars / (dur / 60), 1) if dur else 0,   # Q6
-        "추정화자수": len({spk for _s, _e, spk in r["turns"]}),
+        "추정화자수": n_spk,
+        "화자id목록": sorted({int(spk) for _s, _e, spk in r["turns"]}),
         "디코딩초": round(r["t_decode"], 1),
-        "전사초": round(r["t_asr"], 1),                              # Q7
-        "화자분리초": round(r["t_diar"], 1),
-        "실시간배속": round(dur / (r["t_asr"] + r["t_diar"]), 2) if dur else 0,
+        "전사초": round(t_asr, 1),                                  # Q7
+        "화자분리초": round(t_diar, 1),
+        "처리초합": round(t_asr + t_diar, 1),
+        "오디오1분당처리초": round((t_asr + t_diar) / (dur / 60), 1) if dur else 0,
+        "실시간배속": round(dur / (t_asr + t_diar), 2) if (t_asr + t_diar) else 0,
         "출력": str(out),
+        "세그먼트수": len(r["segments"]),
+        "턴수": len(r["turns"]),
     }
+    detail = {
+        "stat": stat,
+        "segments": [
+            {"start": s, "end": e, "text": t} for s, e, t in r["segments"]
+        ],
+        "turns": [
+            {"start": s, "end": e, "speaker": spk} for s, e, spk in r["turns"]
+        ],
+        "lines": [
+            {"start": s, "end": e, "speaker": spk, "text": t}
+            for s, e, spk, t in lines
+        ],
+    }
+    js = path.with_name(f"{path.stem}.{tag}.pilot.json")
+    js.write_text(json.dumps(detail, ensure_ascii=False, indent=2), encoding="utf-8")
+    stat["json"] = str(js)
     print(json.dumps(stat, ensure_ascii=False, indent=2), flush=True)
     return stat
 
@@ -171,6 +214,8 @@ def main():
     # 0.9에서 정답과 일치. 단 중국어 음원 + zh 임베딩 모델 기준이므로 한국어 회의로 재보정 필요.
     p.add_argument("--cluster-threshold", type=float, default=0.9)
     p.add_argument("--self-test", action="store_true")
+    p.add_argument("--json-out", type=Path, default=None,
+                   help="전체 통계 JSON 경로 (기본: .stt-pilot-cache/stt_pilot_stats.json)")
     args = p.parse_args()
 
     if args.self_test:
@@ -181,16 +226,33 @@ def main():
 
     stats = [run_one(f, args) for f in args.files]
 
+    sizes = {}
     venv = Path(sys.prefix)
     if venv != Path(sys.base_prefix):   # Q9 — 설치 용량
-        size = sum(f.stat().st_size for f in venv.rglob("*") if f.is_file())
-        print(f"\n의존성 설치 용량: {size / 1e6:.0f} MB ({venv})")
+        sizes["venv_bytes"] = _dir_bytes(venv)
+        sizes["venv"] = str(venv)
+        print(f"\n의존성 설치 용량: {sizes['venv_bytes'] / 1e6:.0f} MB ({venv})")
     if CACHE.exists():
-        size = sum(f.stat().st_size for f in CACHE.rglob("*") if f.is_file())
-        print(f"모델 캐시 용량: {size / 1e6:.0f} MB ({CACHE})")
+        sizes["sherpa_cache_bytes"] = _dir_bytes(CACHE)
+        sizes["sherpa_cache"] = str(CACHE)
+        print(f"sherpa 모델 캐시: {sizes['sherpa_cache_bytes'] / 1e6:.0f} MB ({CACHE})")
+    hf = _hf_cache_root()
+    if hf.exists():
+        sizes["hf_cache_bytes"] = _dir_bytes(hf)
+        sizes["hf_cache"] = str(hf)
+        print(f"HuggingFace 캐시: {sizes['hf_cache_bytes'] / 1e6:.0f} MB ({hf})")
+        hub = hf / "hub"
+        if hub.exists():
+            for child in sorted(hub.iterdir()):
+                if child.is_dir() and "faster-whisper" in child.name:
+                    b = _dir_bytes(child)
+                    print(f"  {child.name}: {b / 1e6:.0f} MB")
 
-    summary = Path(__file__).parent / "stt_pilot_stats.json"
-    summary.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = {"runs": stats, "sizes": sizes}
+    summary = args.json_out or (CACHE / "stt_pilot_stats.json")
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
     print(f"통계 요약: {summary}")
 
 

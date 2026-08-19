@@ -43,6 +43,8 @@ CONVERT_TIMEOUT = 120             # 파일당 변환 (초)
 
 SUPPORTED_EXTS = {".hwp", ".hwpx", ".hml", ".pdf", ".docx", ".xlsx", ".xls"}
 PASSTHROUGH_EXTS = {".txt", ".md", ".markdown"}
+# 음성·영상은 kordoc 변환 대상이 아니다. 호출자가 STT 경로로 보내도록 신호를 낸다.
+AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".mov"}
 
 # 엔진 상태 (status()의 state)
 STATE_READY = "ready"
@@ -314,11 +316,18 @@ def _file_result(path: str, **kw) -> dict:
 
 def convert_file(path: str) -> dict:
     """단일 파일 → {ok, name, path, markdown, chars, error?, error_code?}
-    전제: 호출 측에서 ensure_kordoc 완료 (PASSTHROUGH 제외)."""
+    전제: 호출 측에서 ensure_kordoc 완료 (PASSTHROUGH 제외).
+    음성·영상(AUDIO_EXTS)은 변환하지 않고 error_code="needs_stt" 를 반환한다."""
     if not path or not os.path.isfile(path):
         return _file_result(path or "", error="파일을 찾을 수 없습니다.",
                             error_code="file_missing")
     ext = os.path.splitext(path)[1].lower()
+
+    if ext in AUDIO_EXTS:
+        return _file_result(
+            path,
+            error="음성·영상 파일은 문서 변환이 아니라 전사(STT) 경로로 처리하세요.",
+            error_code="needs_stt")
 
     if ext in PASSTHROUGH_EXTS:
         try:
