@@ -94,11 +94,13 @@ def _err(msg, **kw):
 
 # ---------- Gemini ----------
 
-def _gemini_json(api_key, model, prompt, schema, timeout, temperature=0.2):
+def _gemini_json(api_key, model, prompt, schema, timeout, temperature=0.2, images=None):
     gen = {"temperature": temperature, "responseMimeType": "application/json"}
     if schema:
         gen["responseSchema"] = schema
-    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": gen}
+    parts = [{"text": prompt}] + [
+        {"inline_data": {"mime_type": "image/png", "data": b64}} for b64 in (images or [])]
+    payload = {"contents": [{"parts": parts}], "generationConfig": gen}
     url = f"{GEMINI_BASE}/models/{model}:generateContent"
     r = requests.post(url, json=payload, timeout=timeout,
                       headers={"x-goog-api-key": api_key, "Content-Type": "application/json"})
@@ -133,16 +135,28 @@ def _gemini_json(api_key, model, prompt, schema, timeout, temperature=0.2):
 
 # ---------- OpenAI ----------
 
-def _openai_json(api_key, model, prompt, timeout):
+def _openai_json(api_key, model, prompt, schema, timeout, images=None):
     url = f"{OPENAI_BASE}/chat/completions"
+    user_content = prompt
+    if images:
+        user_content = [{"type": "text", "text": prompt}] + [
+            {"type": "image_url",
+             "image_url": {"url": f"data:image/png;base64,{b64}"}} for b64 in images]
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": "너는 오직 JSON 객체만 출력한다. 설명·코드펜스 금지."},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ],
         "response_format": {"type": "json_object"},
     }
+    # schema=None·변환 불가(동적 키 등)는 기존 json_object. 텍스트 호출이 깨지지 않게.
+    std = gemini_to_jsonschema(schema) if schema else None
+    if std:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": std, "strict": False},
+        }
     r = requests.post(url, json=payload, timeout=timeout,
                       headers={"Authorization": f"Bearer {api_key}",
                                "Content-Type": "application/json"})
@@ -159,12 +173,18 @@ def _openai_json(api_key, model, prompt, timeout):
 
 # ---------- Anthropic ----------
 
-def _anthropic_json(api_key, model, prompt, schema, timeout):
+def _anthropic_json(api_key, model, prompt, schema, timeout, images=None):
     url = f"{ANTHROPIC_BASE}/messages"
+    user_content = prompt
+    if images:
+        user_content = [{"type": "image",
+                         "source": {"type": "base64", "media_type": "image/png",
+                                    "data": b64}} for b64 in images]
+        user_content.append({"type": "text", "text": prompt})
     payload = {
         "model": model,
         "max_tokens": 8000,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": user_content}],
     }
     std = gemini_to_jsonschema(schema) if schema else None
     if std:
@@ -265,22 +285,29 @@ _RETRY_STATUS = {429, 500, 502, 503, 529}
 
 
 def complete_json(provider, api_key, model, prompt, schema=None, timeout=60,
-                  temperature=0.2):
-    """프로바이더 공통 JSON 응답. 일시 오류(429/5xx·파싱 실패)는 대기 후 최대 3회 재시도.
+                  temperature=0.2, images=None):
+    """프로바이더 공통 JSON 응답. 일시 오류(429/5xx·파싱 실패)는 대기 후 재시도.
+
+    images=None(텍스트 전용 — 견적서·회의록): 최대 3회 시도. 기존과 동일.
+    images가 있으면 비전 입력을 넣고 재시도 1회(총 2회)로 제한한다.
+    OpenAI는 schema가 변환되면 response_format json_schema로 강제하고,
+    schema=None·변환 불가면 기존 json_object를 유지한다.
 
     오류 dict에는 status(HTTP 코드)가 실리며, 재시도 판단은 status/retryable로만 한다.
     429 응답이 retry_after(초)를 주면 그 시간(최대 30초)만큼 대기한다."""
     if not api_key:
         return _err(f"{PROVIDER_LABELS.get(provider, provider)} API 키가 없습니다. 설정에서 입력하세요.")
     last = None
-    for attempt in range(3):
+    # 비전은 대형 PNG 재전송을 1회로 제한. 텍스트(images=None)는 3회 유지.
+    attempts = 2 if images else 3
+    for attempt in range(attempts):
         try:
             if provider == "gemini":
-                r = _gemini_json(api_key, model, prompt, schema, timeout, temperature)
+                r = _gemini_json(api_key, model, prompt, schema, timeout, temperature, images)
             elif provider == "openai":
-                r = _openai_json(api_key, model, prompt, timeout)
+                r = _openai_json(api_key, model, prompt, schema, timeout, images)
             elif provider == "anthropic":
-                r = _anthropic_json(api_key, model, prompt, schema, timeout)
+                r = _anthropic_json(api_key, model, prompt, schema, timeout, images)
             else:
                 return _err(f"알 수 없는 AI 프로바이더: {provider}")
         except requests.Timeout:
@@ -291,7 +318,7 @@ def complete_json(provider, api_key, model, prompt, schema=None, timeout=60,
         if r.get("ok"):
             return r
         last = r
-        if (r.get("status") in _RETRY_STATUS or r.get("retryable")) and attempt < 2:
+        if (r.get("status") in _RETRY_STATUS or r.get("retryable")) and attempt < attempts - 1:
             if r.get("status") in _RETRY_STATUS:        # 파싱 실패는 즉시 재시도
                 delay = max(8 * (attempt + 1), int(r.get("retry_after") or 0))
                 time.sleep(min(delay, 30))

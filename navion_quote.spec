@@ -80,6 +80,7 @@ datas = [
     ("ui", "ui"),
     ("templates/견적서_템플릿.hwp", "templates"),
     ("templates/회의록_양식.hwpx", "templates"),
+    ("tools/win_ocr.ps1", "tools"),   # 영수증 Windows 내장 OCR 실행기
     *collect_data_files('certifi'),   # cacert.pem — HTTPS 요청용 TLS 인증서 번들
 ]
 # fieldmap.json이 있으면 번들에 포함 (없어도 빌드는 계속)

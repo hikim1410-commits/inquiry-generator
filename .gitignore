@@ -30,3 +30,10 @@ map-editor-*.png
 
 # Windows 특수 장치명 (실수로 생성된 경우)
 nul
+
+# STT 파일럿 (임시 — 게이트 판정 후 제거)
+.venv-stt/
+.stt-pilot-cache/
+*.pilot.txt
+scripts/stt_pilot_stats.json
+*.bak-*
