@@ -46,7 +46,8 @@ class ApiCore:
         window.events.loaded += self._wire_dropzones
 
     # 드롭존 셀렉터 → JS 통지 시 zone 식별자
-    _DROPZONES = (("#ai-dropzone", "ai"), ("#minutes-dropzone", "minutes"))
+    _DROPZONES = (("#ai-dropzone", "ai"), ("#minutes-dropzone", "minutes"),
+                  ("#receipt-dropzone", "receipt"))
 
     def _wire_dropzones(self):
         """pywebview DOM 이벤트로 drop을 받아야 파일 전체 경로(pywebviewFullPath)가

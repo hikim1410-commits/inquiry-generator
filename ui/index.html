@@ -21,6 +21,10 @@
         <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         <span class="nav-label">회의록</span>
       </button>
+      <button class="nav-btn" data-view="receipt" title="영수증">
+        <svg viewBox="0 0 24 24"><path d="M6 2h12v20l-2-1.5-2 1.5-2-1.5-2 1.5-2-1.5-2 1.5z"/><path d="M9 7h6M9 11h6M9 15h4"/></svg>
+        <span class="nav-label">영수증</span>
+      </button>
       <button class="nav-btn" data-view="settings" title="설정">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h.01a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
         <span class="nav-label">설정</span>
@@ -327,6 +331,57 @@
       </div>
       </div><!-- /#view-minutes -->
     </section><!-- /#hub-minutes -->
+
+    <!-- ===== 영수증 허브 ===== -->
+    <section id="hub-receipt" class="view">
+      <div id="view-receipt" class="subview active">
+        <header class="topbar">
+          <div class="crumb"><span class="crumb-dim">내비온</span> <span class="crumb-sep">›</span> <b>영수증</b></div>
+          <div class="topbar-right">
+            <button id="receipt-extract-btn" class="btn btn-violet" type="button">추출</button>
+            <button id="receipt-confirm-btn" class="btn btn-primary" type="button">확정</button>
+            <button id="receipt-export-btn" class="btn btn-outline" type="button">Excel 내보내기</button>
+            <button id="receipt-clear-btn" class="btn btn-ghost" type="button">비우기</button>
+          </div>
+        </header>
+
+        <div id="receipt-notice" class="update-banner hidden">
+          <span>영수증 이미지는 선택한 AI 제공사로 전송됩니다. 카드번호는 마스킹된 값만 남습니다.</span>
+          <button id="receipt-notice-close" class="btn btn-ghost btn-mini" type="button">확인</button>
+        </div>
+
+        <div class="receipt-form">
+          <div class="card form-card">
+            <h3>영수증 추가 <span class="h-sub">사진·스캔·PDF (여러 장 가능)</span></h3>
+            <div id="receipt-dropzone">
+              <div class="dz-icon">📎</div>
+              <div class="dz-label"><b>영수증 사진·스캔·PDF를 여기에 드롭</b>하거나<br>버튼으로 선택하세요</div>
+              <div class="dz-sub">JPG·JPEG·PNG·BMP·TIF·TIFF·PDF 지원</div>
+              <button id="receipt-pick-btn" class="btn btn-ghost dz-pick-btn" type="button">파일 선택…</button>
+            </div>
+            <div id="receipt-progress" class="hidden"></div>
+            <div id="receipt-status"></div>
+          </div>
+        </div>
+
+        <div class="rc-layout">
+          <div class="rc-list-pane">
+            <div id="receipt-list"></div>
+            <div id="receipt-empty" class="empty">
+              <div class="empty-emoji">🧾</div>
+              <p>표시할 영수증이 없습니다.<br>파일을 드롭하거나 선택해 추가하세요.</p>
+            </div>
+          </div>
+          <div id="receipt-detail" class="rc-detail">
+            <div class="rc-image-wrap">
+              <img id="receipt-image" alt="영수증 원본">
+            </div>
+            <div id="receipt-flags"></div>
+            <div id="receipt-fields"></div>
+          </div>
+        </div>
+      </div><!-- /#view-receipt -->
+    </section><!-- /#hub-receipt -->
 
     <!-- ===== 설정 ===== -->
     <section id="view-settings" class="view">

@@ -9,13 +9,15 @@ const COMPANY_FIELDS = [
 ];
 
 const state = {
-  view: 'quote',                                    // 'quote' | 'minutes' | 'settings'
-  sub: { quote: 'dashboard', minutes: 'dashboard' }, // 허브별 현재 서브탭
+  view: 'quote',                                    // 'quote' | 'minutes' | 'receipt' | 'settings'
+  sub: { quote: 'dashboard', minutes: 'dashboard', receipt: 'main' }, // 허브별 현재 서브탭
   config: null,
   folder: '',          // 견적서 작업 폴더 (doc_types.quote)
   minutesFolder: '',   // 회의록 작업 폴더 (doc_types.minutes)
   quotes: [],
   minutes: [],         // 회의록 대시보드 스캔 결과
+  receipts: [],        // 영수증 카드 목록 (세션 메모리)
+  receiptSel: '',      // 선택 중인 영수증 id
   filter: 'all',
   search: '',
   mnSearch: '',        // 회의록 대시보드 검색어
@@ -41,6 +43,12 @@ const DOC_TYPES = {
     subs: {
       dashboard: { panel: 'view-minutes-dashboard', label: '대시보드', init: () => refreshMinutesDashboard() },
       compose:   { panel: 'view-minutes',           label: '작성',     init: () => initMinutesComposeLazy() },
+    },
+  },
+  receipt: {
+    label: '영수증', hub: 'hub-receipt', defaultSub: 'main',
+    subs: {
+      main: { panel: 'view-receipt', label: '영수증', init: () => refreshReceiptView() },
     },
   },
 };
@@ -548,6 +556,7 @@ async function refreshConvertStatus() {
   const r = await call('convert_status');
   setDropzoneState('#ai-dropzone', '#ai-node-banner', r);
   setDropzoneState('#minutes-dropzone', '#mn-node-banner', r);
+  // #receipt-dropzone 은 kordoc/node 게이트(setDropzoneState)를 적용하지 않는다
 }
 
 /* JS-side dragover/enter/leave/drop 배선.
@@ -587,6 +596,7 @@ function wireDropzones() {
   document.addEventListener('drop', e => e.preventDefault());
   wireDropzone('#ai-dropzone');
   wireDropzone('#minutes-dropzone');
+  wireDropzone('#receipt-dropzone');
 }
 
 /* Python → JS 드롭 통지 (api.py _on_drop → evaluate_js) */
@@ -598,6 +608,7 @@ window.onNativeFilesDropped = function(data) {
   }
   if (!data.paths || !data.paths.length) return;
   if (data.zone === 'minutes') handleMinutesDroppedPaths(data.paths);
+  else if (data.zone === 'receipt') handleReceiptDroppedPaths(data.paths);
   else handleDroppedPaths(data.paths);
 };
 
@@ -2680,6 +2691,273 @@ async function checkUpdateSilently() {
 }
 
 /* ===================================================================
+   영수증 뷰
+=================================================================== */
+let _receiptImgId = '';
+
+window.onReceiptProgress = function (p) {
+  p = p || {};
+  const box = $('#receipt-progress');
+  if (box) box.classList.remove('hidden');
+  const st = $('#receipt-status');
+  if (st) st.textContent = `${p.done || 0}/${p.total || 0} ${p.name || ''}`.trim();
+};
+
+function replaceReceipts(items) {
+  state.receipts = Array.isArray(items) ? items : [];
+  if (state.receiptSel && !state.receipts.some(c => c.id === state.receiptSel)) {
+    state.receiptSel = '';
+    _receiptImgId = '';
+  }
+}
+
+async function refreshReceiptView() {
+  const r = await call('get_receipt_state');
+  if (!r.ok) { toast(r.error || '영수증 상태를 불러오지 못했습니다', 'err'); return; }
+  replaceReceipts(r.items);
+  const notice = $('#receipt-notice');
+  if (notice) notice.classList.toggle('hidden', !!r.notice_shown);
+  renderReceiptList();
+  if (state.receiptSel) renderReceiptDetail(state.receiptSel);
+}
+
+async function handleReceiptDroppedPaths(paths) {
+  overlay(true, '영수증 추가 중...');
+  const r = await call('add_receipts', paths);
+  overlay(false);
+  if (!r.ok) { toast(r.error || '추가 실패', 'err'); return; }
+  if (Array.isArray(r.items)) replaceReceipts(r.items);
+  (r.skipped || []).forEach(s => toast(`${s.name || ''}: ${s.reason || '건너뜀'}`, 'warn', 4000));
+  renderReceiptList();
+  const pending = state.receipts.filter(c => c.status === 'pending').map(c => c.id);
+  if (pending.length) await extractReceipts(pending);
+  else if (!state.receiptSel && state.receipts[0]) renderReceiptDetail(state.receipts[0].id);
+}
+
+async function extractReceipts(ids) {
+  const prog = $('#receipt-progress');
+  if (prog) prog.classList.remove('hidden');
+  const st = $('#receipt-status');
+  if (st) st.textContent = '추출 중...';
+  overlay(true, '영수증 추출 중...');
+  const r = ids && ids.length ? await call('extract_receipts', ids) : await call('extract_receipts');
+  overlay(false);
+  if (prog) prog.classList.add('hidden');
+  if (!r.ok) { toast(r.error || '추출 실패', 'err'); return; }
+  replaceReceipts(r.items);
+  renderReceiptList();
+  if (state.receiptSel) renderReceiptDetail(state.receiptSel);
+  else if (state.receipts[0]) renderReceiptDetail(state.receipts[0].id);
+}
+
+function renderReceiptList() {
+  const list = $('#receipt-list');
+  const empty = $('#receipt-empty');
+  if (!list) return;
+  list.innerHTML = '';
+  const items = state.receipts;
+  if (empty) empty.classList.toggle('hidden', items.length > 0);
+  for (const c of items) {
+    const cls = ['rc-card'];
+    if (c.id === state.receiptSel) cls.push('active');
+    if (c.status === 'error') cls.push('err');
+    const card = el('div', cls.join(' '));
+    card.dataset.id = c.id;
+    const d = c.data || {};
+    const page = (c.page_total > 1) ? ` (${c.page_index}/${c.page_total})` : '';
+    const stLabel = c.confirmed ? '확정' : (c.status === 'error' ? '오류' : (c.status === 'pending' ? '대기' : (c.status === 'ok' ? '추출' : (c.status || ''))));
+    const flagHtml = (c.flag_texts || []).map(t => `<span class="rc-flag rc-badge">${esc(t)}</span>`).join('');
+    let body = `<div title="${esc(c.path || c.name)}">${esc(c.name || '')}${esc(page)}</div>`;
+    if (d.store_name) body += `<div>${esc(d.store_name)}</div>`;
+    if (stLabel) body += `<span class="rc-badge">${esc(stLabel)}</span>`;
+    body += flagHtml;
+    if (c.status === 'error') {
+      body += `<div>${esc(c.error || '추출 실패')}</div>`;
+      body += `<button type="button" class="btn btn-mini" data-rc-retry="${esc(c.id)}">다시 추출</button>`;
+    }
+    card.innerHTML = body;
+    list.appendChild(card);
+  }
+}
+
+function receiptFieldWarn(card) {
+  const w = {};
+  (card.flags || []).forEach(f => {
+    if (f === 'sum_mismatch') { w.total_amount = true; w.items = true; }
+    else if (f === 'vat_mismatch') { w.supply_amount = true; w.vat = true; w.total_amount = true; }
+    else if (f === 'no_total') w.total_amount = true;
+    else if (f === 'no_items') w.items = true;
+    else if (f === 'refund_suspected') w.total_amount = true;
+    else if (f === 'vat_separate') w.vat = true;
+  });
+  const tot = card.data && card.data.total_amount;
+  if (tot == null || tot === '' || Number(tot) === 0) w.total_amount = true;
+  return w;
+}
+
+async function renderReceiptDetail(id) {
+  state.receiptSel = id || '';
+  renderReceiptList();
+  const card = state.receipts.find(c => c.id === id);
+  const img = $('#receipt-image');
+  const flagsEl = $('#receipt-flags');
+  const fieldsEl = $('#receipt-fields');
+  if (!card) {
+    if (flagsEl) flagsEl.innerHTML = '';
+    if (fieldsEl) fieldsEl.innerHTML = '';
+    if (img) img.removeAttribute('src');
+    _receiptImgId = '';
+    return;
+  }
+  const d = card.data || {};
+  const warn = receiptFieldWarn(card);
+  if (flagsEl) {
+    const parts = [];
+    (card.flag_texts || []).forEach(t => parts.push(`<span class="rc-flag">${esc(t)}</span>`));
+    if (card.fallback_reason) parts.push(`<span class="rc-flag">${esc(card.fallback_reason)}</span>`);
+    if (card.error) parts.push(`<span class="rc-flag">${esc(card.error)}</span>`);
+    if (card.status === 'error') {
+      parts.push(`<button type="button" class="btn btn-mini" data-rc-retry="${esc(card.id)}">다시 추출</button>`);
+    }
+    flagsEl.innerHTML = parts.join(' ');
+  }
+  if (fieldsEl) {
+    const rows = [
+      ['store_name', '상호', 'text'],
+      ['biz_no', '사업자번호', 'text'],
+      ['tx_datetime', '거래일시', 'text'],
+      ['supply_amount', '공급가액', 'num'],
+      ['vat', '부가세', 'num'],
+      ['total_amount', '합계', 'num'],
+      ['card_no_masked', '카드번호', 'text'],
+      ['approval_no', '승인번호', 'text'],
+    ];
+    let html = '';
+    for (const [key, label, kind] of rows) {
+      const raw = d[key];
+      const unknown = (key === 'supply_amount' || key === 'vat') && (raw == null || raw === '');
+      const cls = ['rc-field'];
+      if (warn[key]) cls.push('warn');
+      if (unknown) cls.push('rc-unknown');
+      const val = kind === 'num'
+        ? ((raw == null || raw === '') ? '' : commafy(raw))
+        : (raw == null ? '' : raw);
+      const ph = unknown ? '미확인' : '';
+      html += `<label class="${cls.join(' ')}">${esc(label)} <input data-rk="${esc(key)}" data-kind="${kind}" value="${esc(val)}" placeholder="${esc(ph)}"></label>`;
+    }
+    const items = Array.isArray(d.items) ? d.items : [];
+    const icls = ['rc-items', 'rc-field'];
+    if (warn.items) icls.push('warn');
+    html += `<div class="${icls.join(' ')}"><div>품목</div>`;
+    items.forEach((it, i) => {
+      it = it || {};
+      const qUnknown = it.qty == null || it.qty === '';
+      const qVal = qUnknown ? '' : it.qty;
+      const pVal = (it.price == null || it.price === '') ? '' : commafy(it.price);
+      html += `<div>
+        <input data-rk="item" data-i="${i}" data-ik="name" data-kind="text" value="${esc(it.name || '')}" placeholder="품목명">
+        <input data-rk="item" data-i="${i}" data-ik="qty" data-kind="num" class="${qUnknown ? 'rc-unknown' : ''}" value="${esc(qVal)}" placeholder="${qUnknown ? '미확인' : '수량'}">
+        <input data-rk="item" data-i="${i}" data-ik="price" data-kind="num" value="${esc(pVal)}" placeholder="금액">
+      </div>`;
+    });
+    html += `</div>`;
+    fieldsEl.innerHTML = html;
+  }
+  if (img && _receiptImgId !== id) {
+    _receiptImgId = id;
+    img.removeAttribute('src');
+    const ir = await call('get_receipt_image', id);
+    if (state.receiptSel !== id) return;
+    if (ir.ok && ir.data_uri) img.src = ir.data_uri;
+  }
+}
+
+async function onReceiptFieldChange(e) {
+  const input = e.target.closest && e.target.closest('[data-rk]');
+  if (!input || !state.receiptSel) return;
+  const card = state.receipts.find(c => c.id === state.receiptSel);
+  if (!card) return;
+  const patch = {};
+  if (input.dataset.rk === 'item') {
+    const idx = +input.dataset.i;
+    const ik = input.dataset.ik;
+    const items = (card.data && Array.isArray(card.data.items) ? card.data.items : []).map(x => Object.assign({}, x));
+    if (!items[idx] || !ik) return;
+    items[idx][ik] = input.dataset.kind === 'num'
+      ? (String(input.value).trim() === '' ? null : parseMoney(input.value))
+      : input.value;
+    patch.items = items;
+  } else {
+    const key = input.dataset.rk;
+    patch[key] = input.dataset.kind === 'num'
+      ? (String(input.value).trim() === '' ? null : parseMoney(input.value))
+      : input.value;
+  }
+  const r = await call('update_receipt', { id: state.receiptSel, data: patch });
+  if (!r.ok) { toast(r.error || '수정 실패', 'err'); return; }
+  if (r.item) {
+    const i = state.receipts.findIndex(c => c.id === r.item.id);
+    if (i >= 0) state.receipts[i] = r.item;
+    else state.receipts.push(r.item);
+  }
+  renderReceiptDetail(state.receiptSel);
+}
+
+async function confirmReceipts() {
+  overlay(true, '확정 중...');
+  const r = await call('confirm_receipts');
+  overlay(false);
+  if (!r.ok) { toast(r.error || '확정 실패', 'err'); return; }
+  const n = r.confirmed || 0, b = r.blocked || 0;
+  if (b) toast(`${n}건 확정, ${b}건은 오류라 확정하지 않았습니다`, 'warn', 5000);
+  else toast(`${n}건 확정`, 'ok');
+  await refreshReceiptView();
+}
+
+async function exportReceiptsUi() {
+  overlay(true, 'Excel 저장 중...');
+  const r = await call('export_receipts');
+  overlay(false);
+  if (r.cancelled) return;
+  if (!r.ok) { toast(r.error || '내보내기 실패', 'err'); return; }
+  toast(`저장했습니다: ${r.path || ''} (${r.count || 0}건)`, 'ok', 5000);
+}
+
+async function clearReceipts() {
+  overlay(true, '목록 지우는 중...');
+  const r = await call('clear_receipts');
+  overlay(false);
+  if (!r.ok) { toast(r.error || '삭제 실패', 'err'); return; }
+  replaceReceipts([]);
+  state.receiptSel = '';
+  _receiptImgId = '';
+  renderReceiptList();
+  renderReceiptDetail('');
+}
+
+async function pickReceiptFiles() {
+  const r = await call('pick_receipt_files');
+  if (r && r.ok && r.paths && r.paths.length) await handleReceiptDroppedPaths(r.paths);
+}
+
+async function closeReceiptNotice() {
+  const r = await call('mark_receipt_notice_seen');
+  if (!r.ok) { toast(r.error || '저장 실패', 'err'); return; }
+  const n = $('#receipt-notice');
+  if (n) n.classList.add('hidden');
+}
+
+function onReceiptClick(e) {
+  const retry = e.target.closest && e.target.closest('[data-rc-retry]');
+  if (retry && retry.dataset.rcRetry) {
+    extractReceipts([retry.dataset.rcRetry]);
+    return;
+  }
+  const card = e.target.closest && e.target.closest('#receipt-list .rc-card');
+  if (card && card.dataset.id) renderReceiptDetail(card.dataset.id);
+}
+
+/* ===================================================================
    초기화 / 이벤트 바인딩
 =================================================================== */
 let _inited = false;
@@ -2833,6 +3111,28 @@ async function init() {
     const idx = +btn.dataset.idx, act = btn.dataset.act;
     if (act === 'del') mnDeleteItem(idx); else mnReorderItem(idx, act === 'up' ? -1 : 1);
   });
+
+  // 영수증 (계약 4절 id가 있을 때만 묶는다 — 마크업 워커와 병행)
+  const rcPick = $('#receipt-pick-btn');
+  if (rcPick) rcPick.addEventListener('click', pickReceiptFiles);
+  const rcExt = $('#receipt-extract-btn');
+  if (rcExt) rcExt.addEventListener('click', () => {
+    const ids = state.receipts.filter(c => c.status === 'pending' || c.status === 'error').map(c => c.id);
+    if (!ids.length) { toast('추출할 영수증이 없습니다', 'info'); return; }
+    extractReceipts(ids);
+  });
+  const rcConf = $('#receipt-confirm-btn');
+  if (rcConf) rcConf.addEventListener('click', confirmReceipts);
+  const rcExp = $('#receipt-export-btn');
+  if (rcExp) rcExp.addEventListener('click', exportReceiptsUi);
+  const rcClr = $('#receipt-clear-btn');
+  if (rcClr) rcClr.addEventListener('click', clearReceipts);
+  const rcNotice = $('#receipt-notice-close');
+  if (rcNotice) rcNotice.addEventListener('click', closeReceiptNotice);
+  const rcFields = $('#receipt-fields');
+  if (rcFields) rcFields.addEventListener('change', onReceiptFieldChange);
+  const rcView = $('#view-receipt') || $('#hub-receipt');
+  if (rcView) rcView.addEventListener('click', onReceiptClick);
 
   // 설정
   $('#s-price-year').addEventListener('change', e => renderPriceTable(e.target.value));
