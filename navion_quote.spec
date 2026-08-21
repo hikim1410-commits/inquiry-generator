@@ -117,6 +117,15 @@ hiddenimports = [
     "faster_whisper",
     "ctranslate2",
     "sherpa_onnx",
+    # dateutil — pandas._libs.tslibs.offsets(컴파일된 .pyd)가 런타임에만 import 하므로
+    # PyInstaller 정적 분석으로는 원리적으로 감지되지 않는다. pandas 소스에서 이 둘을
+    # 정적 import 하는 곳은 tests/ 뿐이라, tests 수집 여부에 따라 들쭉날쭉 누락된다.
+    # 빠지면 pyhwpx → import pandas 가 ModuleNotFoundError 로 죽고, 실패한 pandas 가
+    # sys.modules 에 부분 초기화 상태로 남아 이후 모든 재시도가
+    # "_pandas_datetime_CAPI 없음"으로 영구 실패한다 — 앱 재시작 전까지 회복 불가.
+    # (v2.0.0 배포본 실장애, tasks/lessons.md 2026-08-21 참고)
+    "dateutil.easter",
+    "dateutil.rrule",
 ]
 
 # 데이터/바이너리/서브모듈을 통째로 수집해야 안전한 패키지들

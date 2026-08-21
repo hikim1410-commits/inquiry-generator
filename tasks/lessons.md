@@ -183,3 +183,26 @@
 - **교훈**: ① 읽기 경로와 쓰기 경로가 좌표/규칙을 공유하지 않으면 반드시 어긋난다
   (쓰기는 cell_map, 읽기는 고정 좌표). ② 같은 파일을 쓰는 저장 함수가 2개면
   한쪽이 다른 쪽 키를 지운다 — 병합 저장이 기본값이어야 한다.
+
+## 2026-08-21: v2.0.0 배포본 견적서/회의록 생성 전면 불능 (dateutil.easter 누락)
+- **현상**: 생성 버튼마다 "partially initialized module 'pandas' ... has no attribute
+  '_pandas_datetime_CAPI' (most likely due to a circular import)". 재시도해도 동일.
+- **진짜 첫 실패**: 그보다 앞선 로그에 `No module named 'dateutil.easter'`.
+  pandas 에러는 2차 증상이었다 — 첫 import 실패로 pandas가 sys.modules에 부분
+  초기화 상태로 남고, 이후 모든 재시도가 CAPI 부재로 영구 실패(앱 재시작 전까지 회복 불가).
+- **원인**: `pandas._libs.tslibs.offsets`(컴파일된 .pyd)가 런타임에만 dateutil.easter를
+  import → PyInstaller 정적 분석으로는 원리적으로 감지 불가. pandas 소스에서 이를
+  정적 import 하는 곳은 `tests/tseries/offsets/test_easter.py` 뿐이라, 빌드 머신의
+  tests 수집 여부에 따라 우연히 들어갔다 빠졌다 한다. v1.9.0(pandas 3.0.5) 빌드는
+  우연히 통과, v2.0.0(pandas 3.0.3, 다른 PC) 빌드에서 누락.
+- **격리**: `import pandas`만 하는 최소 exe로는 재현 안 됨 → `--exclude-module
+  dateutil.easter`로 빌드하니 사용자 로그와 동일한 traceback 재현. 배포본 exe의
+  PYZ를 ZlibArchiveReader로 열어 dateutil.easter/rrule 부재를 직접 확인.
+- **수정**: navion_quote.spec hiddenimports에 "dateutil.easter", "dateutil.rrule" 명시.
+- **현장 핫픽스(재빌드 없이)**: 배포본 `_internal/dateutil/`에 easter.py·rrule.py를
+  복사하면 즉시 복구된다. FrozenImporter가 잡은 패키지 __path__가 `_internal/<pkg>`라
+  폴더가 원래 없어도 새로 만들어 넣으면 로드된다(동일 조건 테스트 exe로 검증).
+- **교훈**: ① 반복되는 에러 메시지는 2차 증상일 수 있다 — 로그를 처음까지 거슬러
+  올라가 *첫* 실패를 찾아라. ② 컴파일된 확장 모듈(.pyd) 안의 import는 PyInstaller가
+  못 본다. 우연히 딸려온 의존성은 언제든 빠진다 → hiddenimports에 명시가 유일한 해법.
+  ③ import 실패로 부분 초기화된 모듈은 프로세스가 살아있는 한 계속 독이 된다.
